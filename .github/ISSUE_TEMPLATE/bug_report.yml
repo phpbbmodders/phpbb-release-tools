@@ -1,0 +1,33 @@
+name: Bug report
+description: Something in a release script does not work as described.
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: script
+    attributes:
+      label: Script
+      options:
+        - git-release.sh
+        - git-release-langpack.sh
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the command you ran and the full output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, `git --version`, and for the language pack script also `php -v` if you used `--check`.
+    validations:
+      required: true
