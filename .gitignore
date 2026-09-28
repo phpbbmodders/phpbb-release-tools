@@ -1,0 +1,3 @@
+# phpbb-test-board: its own virtualenv and Python caches
+phpbb-test-board/.venv/
+__pycache__/
