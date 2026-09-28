@@ -3,7 +3,8 @@
 Smoke-test a phpBB extension on a local test board.
 
 Installs the extension from a git checkout into a clean copy of the board
-(created by setup-board.sh), serves the board with PHP error logging on,
+(created by setup-board.sh), after any extensions it needs given with
+--with, serves the board with PHP error logging on,
 and loads:
   - core board pages, as a guest and as the admin
   - the extension's routes that need no parameters
@@ -31,7 +32,7 @@ ensure_venv()
 import requests  # noqa: E402
 import yaml  # noqa: E402
 
-from _board import Board  # noqa: E402
+from _board import Board, ext_name, parse_spec, required_packages  # noqa: E402
 
 CORE_PAGES = ["index.php", "viewforum.php?f=2", "viewtopic.php?t=1", "memberlist.php",
               "memberlist.php?mode=viewprofile&u=2", "posting.php?mode=post&f=2",
@@ -126,6 +127,9 @@ def main() -> int:
     ap.add_argument("repo", help="path to the extension's git checkout")
     ap.add_argument("-r", "--ref", default="HEAD",
                     help="git ref to install, for example origin/main (default: HEAD)")
+    ap.add_argument("-w", "--with", dest="needed", action="append", default=[], metavar="PATH[@REF]",
+                    help="git checkout of an extension this one needs, installed and enabled first "
+                         "(default ref: HEAD); repeat for several, in the order they must be enabled")
     ap.add_argument("-b", "--board-dir",
                     help="board directory created by setup-board.sh (default: $PHPBB_TEST_BOARD)")
     ap.add_argument("-p", "--port", type=int, default=8083,
@@ -135,10 +139,19 @@ def main() -> int:
     repo = Path(args.repo).resolve()
     if not (repo / ".git").exists():
         ap.error(f"{repo} is not a git checkout")
+    try:
+        needed = [parse_spec(spec) for spec in args.needed]
+    except ValueError as e:
+        ap.error(f"--with: {e}")
     board = Board(args.board_dir, args.port)
     report = Report()
 
-    ext, target, out = board.install_ext(repo, args.ref)
+    supplied = {ext_name(r, ref) for r, ref in needed}
+    for package in required_packages(repo, args.ref):
+        if package not in supplied:
+            print(f"  [note] composer.json requires {package}; if it is a phpBB extension, add --with PATH")
+
+    ext, target, out = board.install_ext(repo, args.ref, needed)
     vendor, name = ext.split("/")
     ns = f"{vendor}\\{name}\\"
     print(f"== {ext} ({repo.name} @ {args.ref})")

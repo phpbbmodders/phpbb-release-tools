@@ -14,7 +14,7 @@ import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Sequence
 
 import requests
 
@@ -38,6 +38,7 @@ class Board:
         self.port = port
         self.base = f"http://localhost:{port}"
         self.php_log = Path(base).expanduser().resolve() / "php-errors.log"
+        self.installed: list = []
 
     # -- board state -------------------------------------------------------
 
@@ -79,32 +80,54 @@ class Board:
 
     # -- extensions --------------------------------------------------------
 
-    def install_ext(self, repo: Path, ref: str) -> tuple:
+    def install_ext(self, repo: Path, ref: str, needed: Sequence[tuple] = ()) -> tuple:
         """Copy an extension from git into a clean board and enable it.
 
-        Returns (extension name, installed path, output of the enable command);
-        the caller decides what a failed enable means.
+        needed lists (repo, ref) pairs of other extensions to copy and enable
+        first, in order, for an extension that requires them. Returns
+        (extension name, installed path, output of the enable command); when
+        a needed extension fails to enable, the output says which one and the
+        extension itself is not enabled. The caller decides what a failed
+        enable means.
         """
-        ext = json.loads(subprocess.run(["git", "-C", str(repo), "show", f"{ref}:composer.json"],
-                                        capture_output=True, text=True, check=True).stdout)["name"]
-        vendor, name = ext.split("/")
-        target = self.root / "ext" / vendor / name
         self.reset()
-        shutil.rmtree(target, ignore_errors=True)
-        target.mkdir(parents=True)
-        tar = subprocess.run(["git", "-C", str(repo), "archive", ref], capture_output=True, check=True).stdout
-        subprocess.run(["tar", "-x", "-C", str(target)], input=tar, check=True)
-        self.purge_cache()
+        self.installed = []
+        for dep_repo, dep_ref in needed:
+            dep, _ = self._copy_ext(dep_repo, dep_ref)
+            out = self.cli("extension:enable", dep)
+            self.purge_cache()
+            if "Successfully" not in out:
+                name = ext_name(repo, ref)
+                return name, self.root / "ext" / name, f"needed extension {dep} could not be enabled: {out.strip()}"
+        ext, target = self._copy_ext(repo, ref)
         out = self.cli("extension:enable", ext)
         self.purge_cache()
         return ext, target, out
 
-    def remove_ext(self, target: Path) -> None:
-        """Remove an installed extension's files and restore the clean board."""
+    def _copy_ext(self, repo: Path, ref: str) -> tuple:
+        """Copy an extension's files from git into ext/; return (name, path)."""
+        vendor, name = ext_name(repo, ref).split("/")
+        target = self.root / "ext" / vendor / name
         shutil.rmtree(target, ignore_errors=True)
-        parent = target.parent
-        if parent.is_dir() and not any(parent.iterdir()):
-            parent.rmdir()
+        target.mkdir(parents=True)
+        self.installed.append(target)
+        tar = subprocess.run(["git", "-C", str(repo), "archive", ref], capture_output=True, check=True).stdout
+        subprocess.run(["tar", "-x", "-C", str(target)], input=tar, check=True)
+        self.purge_cache()
+        return f"{vendor}/{name}", target
+
+    def remove_ext(self, target: Path) -> None:
+        """Remove the installed extensions' files and restore the clean board.
+
+        target is the path install_ext() returned; any needed extensions it
+        installed alongside are removed too.
+        """
+        for path in {target, *self.installed}:
+            shutil.rmtree(path, ignore_errors=True)
+            parent = path.parent
+            if parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        self.installed = []
         self.reset()
 
     # -- web server and sessions -------------------------------------------
@@ -164,3 +187,41 @@ class Board:
                        "'user_email'=>" + json.dumps(f"{name}@example.com") + ",'group_id'=>2,"
                        "'user_type'=>USER_NORMAL,'user_regdate'=>time()]);")
         return int(out.strip().splitlines()[-1])
+
+
+# Composer packages that are never phpBB extensions.
+NOT_EXTENSIONS = re.compile(r"^(php|ext-.*|lib-.*|composer/.*|phpbb/phpbb)$")
+
+
+def ext_name(repo: Path, ref: str) -> str:
+    """Return the composer name (vendor/name) of an extension at a git ref."""
+    return composer_json(repo, ref)["name"]
+
+
+def composer_json(repo: Path, ref: str) -> dict:
+    """Read composer.json from an extension checkout at a git ref."""
+    out = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:composer.json"],
+                         capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+def required_packages(repo: Path, ref: str) -> list:
+    """Composer packages an extension requires that may be phpBB extensions.
+
+    Composer can't tell a phpBB extension from a PHP library by name, so the
+    caller should treat the result as "possibly needed", not a hard list.
+    """
+    require = composer_json(repo, ref).get("require", {})
+    return sorted(name for name in require if not NOT_EXTENSIONS.match(name))
+
+
+def parse_spec(spec: str) -> tuple:
+    """Split "PATH[@REF]" into (resolved path, ref); ref defaults to HEAD.
+
+    Raises ValueError if PATH is not a git checkout.
+    """
+    path, _, ref = spec.partition("@")
+    repo = Path(path).expanduser().resolve()
+    if not (repo / ".git").exists():
+        raise ValueError(f"{repo} is not a git checkout")
+    return repo, ref or "HEAD"
