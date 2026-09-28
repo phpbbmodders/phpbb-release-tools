@@ -1,6 +1,6 @@
 # phpbb-release-tools
 
-Two Bash scripts that build release zips for phpBB packages: one for phpBB extensions, one for phpBB language packs.
+Tools for phpBB packages: two Bash scripts that build release zips (one for extensions, one for language packs), and a local test board for smoke-testing extensions (`phpbb-test-board/`).
 
 ## Tools
 
@@ -15,6 +15,7 @@ Both scripts build the zip from the current git commit (`HEAD`), so uncommitted 
 
 - `git-release.sh`: `git`, `jq`, `zip`
 - `git-release-langpack.sh`: `git`, `curl`, `jq`, `unzip`, `zip`. For `--check` also `php`, `composer` and `sha256sum`.
+- `phpbb-test-board/`: `git`, `php` (with the `sqlite3` extension), `composer`, `curl`, `jq`, `openssl`, Python 3 with `venv`, and ImageMagick's `convert` for the reassignthumbs feature check. The Python scripts create and use their own virtualenv (`phpbb-test-board/.venv`) on first run.
 
 ## Usage
 
@@ -43,13 +44,31 @@ git-release-langpack.sh --check --release
 
 Run `git-release-langpack.sh --help` for all options.
 
+### Testing extensions: `phpbb-test-board/`
+
+Builds a local phpBB board on SQLite and runs an extension on it with PHP error logging on, to catch problems that validation and syntax checks miss, such as pages that crash at runtime, forms that can never submit, or an extension that can't be enabled on a fresh board. For local testing only; never expose the board to a network.
+
+```bash
+phpbb-test-board/setup-board.sh -d ~/phpbb-test-board
+export PHPBB_TEST_BOARD=~/phpbb-test-board
+phpbb-test-board/smoke_test.py path/to/extension --ref origin/main
+phpbb-test-board/feature_checks.py path/to/extension@origin/main
+```
+
+- `setup-board.sh` installs the current phpBB 3.3 release (or `--version`) with no extensions, and keeps a clean copy of the database so every test starts from the same state. The admin password is generated and stored only in `board.env`.
+- `smoke_test.py` installs the extension from git, loads board pages as a guest and as the admin, the extension's routes, ACP/MCP/UCP modules and cron tasks, then disables, deletes data and re-enables it. It reports any server error, empty page, phpBB debug notice or PHP error-log entry.
+- `feature_checks.py` exercises the main feature of the phpbbmodders extensions listed in its `--help` (for example: a moderator can't warn a user in an unticked group). Add a check for a new extension in its `CHECKS` table.
+- The board is restored after each run. Each script has `--help`.
+- Not supported yet: an extension that requires another extension (such as one built on `rmcgirr83/stopforumspam`), because only the extension under test is installed.
+
 ## Tests
 
 ```bash
 tests/test-release-scripts.sh
+tests/test-phpbb-test-board.sh
 ```
 
-The tests run offline in a temporary directory. GitHub Actions runs them, and ShellCheck, on every pull request.
+The tests run in a temporary directory; the release script tests are offline, and the test-board tests only check options and errors (the first run creates the Python virtualenv). GitHub Actions runs them, and ShellCheck, on every pull request.
 
 ## Contributing
 
