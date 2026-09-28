@@ -3,7 +3,7 @@
 Exercise the main feature of phpbbmodders extensions on a local test board.
 
 For each extension checkout given, installs it into a clean copy of the board
-(created by setup-board.sh), serves the board, runs that extension's feature
+(created by setup-board.sh), after the --with extensions it requires, serves the board, runs that extension's feature
 check over HTTP, and restores the board. Checks exist for the extensions in
 CHECKS below, keyed by composer name; add one there for a new extension.
 Test users get random throwaway passwords that are never printed.
@@ -26,7 +26,7 @@ ensure_venv()
 
 import requests  # noqa: E402
 
-from _board import Board  # noqa: E402
+from _board import Board, ext_name, parse_spec, required_packages  # noqa: E402
 
 results: list = []
 
@@ -235,6 +235,55 @@ def check_adduser(b: Board) -> None:
     ok(b.sql("SELECT 1 FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'"), "the new account was logged")
 
 
+def check_sfscompanion(b: Board) -> None:
+    # Log entries in the shape rmcgirr83/stopforumspam writes them, plus one
+    # unrelated admin entry that neither log page may show.
+    b.php("$phpbb_log->add('user', 2, '203.0.113.9', 'LOG_SFS_MESSAGE', false, "
+          "['reportee_id' => 2, 'probe-spammer', '203.0.113.9', 'probe-spammer@example.com']);"
+          "$phpbb_log->add('admin', 2, '198.51.100.7', 'LOG_SFS_DOWN', false, ['probe-down@example.com']);"
+          "$phpbb_log->add('admin', 2, '198.51.100.8', 'LOG_CONFIG_SETTINGS');")
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    page = f"{b.base}/adm/index.php?i=-phpbbmodders-sfscompanion-acp-main_module&sid={sid}&mode="
+
+    blocks = admin.get(page + "blocks").text
+    ok("probe-spammer" in blocks, "Spam blocks page lists the blocked registration")
+    ok("was down" not in blocks and "Altered board settings" not in blocks, "Spam blocks page shows nothing else")
+    errors = admin.get(page + "errors").text
+    ok("was down" in errors, "SFS errors page lists the outage")
+    ok("probe-spammer" not in errors and "Altered board settings" not in errors, "SFS errors page shows nothing else")
+    ok("probe-spammer" in admin.get(page + "blocks&isearch=203.0.113.*").text
+       and "probe-spammer" not in admin.get(page + "blocks&isearch=192.0.2.*").text, "IP search filters the list")
+
+    action, fields = form_fields(blocks, "sfs_log")
+    body = post_back(admin, f"{b.base}/adm", page + "blocks", action, {**fields, "delall": "Delete all"})
+    action, fields = form_fields(body, "confirm")
+    ok("confirm_uid" in fields, "Delete all asks for confirmation")
+    post_back(admin, f"{b.base}/adm", page + "blocks", action, {**fields, "delall": "1", "confirm": "Yes"})
+    ops = [r[0] for r in b.sql("SELECT log_operation FROM phpbb_log")]
+    ok("LOG_SFS_MESSAGE" not in ops and "LOG_SFS_DOWN" in ops and "LOG_CONFIG_SETTINGS" in ops,
+       "Delete all removed only the spam block entries")
+    ok("LOG_CLEAR_SFS_BLOCKS" in ops, "the deletion was logged")
+
+    settings = page + "settings"
+    action, fields = form_fields(admin.get(settings).text, "acp_sfs_settings")
+    post_back(admin, f"{b.base}/adm", settings, action, {**fields, "sfsc_expire_days": "7", "submit": "Submit"})
+    ok(b.sql("SELECT config_value FROM phpbb_config WHERE config_name = 'sfsc_expire_days'") == [("7",)],
+       "settings: log prune interval saved")
+
+    ok("sfs-companion/finder" in admin.get(f"{b.base}/memberlist.php?mode=viewprofile&u=2").text,
+       "admin sees the 'Check via StopForumSpam' link on a profile")
+    member_pw = secrets.token_urlsafe(12)
+    b.add_user("sfsmember", member_pw)
+    member = requests.Session()
+    b.login(member, "sfsmember", member_pw)
+    profile = member.get(f"{b.base}/memberlist.php?mode=viewprofile&u=2").text
+    ok("sfsmember" in profile and "sfs-companion/finder" not in profile,
+       "a signed-in member without m_chk_sfs doesn't see the link")
+    ok("not authorised" in member.get(f"{b.base}/app.php/sfs-companion/finder?u=2").text,
+       "a member without m_chk_sfs can't open the lookup page")
+
+
 CHECKS = {
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
     "phpbbmodders/banlist": check_banlist,
@@ -245,6 +294,7 @@ CHECKS = {
     "phpbbmodders/reassignthumbs": check_reassignthumbs,
     "phpbbmodders/honeypot": check_honeypot,
     "phpbbmodders/adduser": check_adduser,
+    "phpbbmodders/sfscompanion": check_sfscompanion,
 }
 
 
@@ -254,23 +304,30 @@ def main() -> int:
                                         + ". Exit status: 0 all passed, 1 a check failed, 2 bad arguments.")
     ap.add_argument("repos", nargs="+", metavar="REPO[@REF]",
                     help="extension git checkout, optionally with a git ref to install (default ref: HEAD)")
+    ap.add_argument("-w", "--with", dest="needed", action="append", default=[], metavar="PATH[@REF]",
+                    help="git checkout of an extension that a tested extension requires (default ref: HEAD); "
+                         "installed and enabled first, only for the extensions whose composer.json requires it; "
+                         "repeat for several, in the order they must be enabled")
     ap.add_argument("-b", "--board-dir",
                     help="board directory created by setup-board.sh (default: $PHPBB_TEST_BOARD)")
     ap.add_argument("-p", "--port", type=int, default=8083,
                     help="port for the temporary web server (default: 8083)")
     args = ap.parse_args()
 
-    targets = []
-    for spec in args.repos:
-        path, _, ref = spec.partition("@")
-        repo = Path(path).resolve()
-        if not (repo / ".git").exists():
-            ap.error(f"{repo} is not a git checkout")
-        targets.append((repo, ref or "HEAD"))
+    try:
+        targets = [parse_spec(spec) for spec in args.repos]
+        needed = [(ext_name(r, ref), r, ref) for r, ref in (parse_spec(spec) for spec in args.needed)]
+    except ValueError as e:
+        ap.error(str(e))
     board = Board(args.board_dir, args.port)
 
     for repo, ref in targets:
-        ext, target, out = board.install_ext(repo, ref)
+        requires = required_packages(repo, ref)
+        deps = [(r, dep_ref) for name, r, dep_ref in needed if name in requires]
+        for package in requires:
+            if package not in {name for name, _, _ in needed}:
+                print(f"  [note] {repo.name} requires {package}; if it is a phpBB extension, add --with PATH")
+        ext, target, out = board.install_ext(repo, ref, deps)
         print(f"== {ext} ({repo.name} @ {ref})")
         try:
             if ext not in CHECKS:

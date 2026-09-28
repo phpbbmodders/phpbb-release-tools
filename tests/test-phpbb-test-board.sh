@@ -68,6 +68,11 @@ check "feature_checks.py with a missing board.env exits 1" \
   exits_with 1 "$tools/feature_checks.py" "$tmp/repo" -b "$tmp/no-board"
 check "feature_checks.py --help lists the extensions with checks" \
   output_has "phpbbmodders/groupwarn" "$tools/feature_checks.py" --help
+for script in smoke_test.py feature_checks.py; do
+  check "$script --help describes --with" output_has "--with PATH[@REF]" "$tools/$script" --help
+  check "$script --with a non-git directory exits 2" \
+    exits_with 2 "$tools/$script" "$tmp/repo" --with "$tmp" -b "$tmp"
+done
 
 if [ "$failures" -eq 0 ]; then
   echo "All tests passed."
