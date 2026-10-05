@@ -2,7 +2,14 @@
 # git-release-langpack.sh
 #
 # Builds a phpBB.com Customisation Database release zip for a phpBB language
-# pack from the current git commit, and optionally validates it first.
+# pack from the current git commit, optionally validates it first, and
+# optionally publishes it as a GitHub Release.
+#
+# Usage:
+#   git-release-langpack.sh --create [--check]
+#   git-release-langpack.sh --gh-release [--check] [--dry-run]
+#   git-release-langpack.sh --check
+#   git-release-langpack.sh --help
 #
 # The zip follows the Language Pack Validation Policy naming rule:
 #   <languagename>_<version>.zip containing a <languagename>_<version>/ folder,
@@ -17,13 +24,19 @@
 #   line, read from phpBB's update-check feed; -v overrides it.
 #
 # Outputs:
-#   <output-dir>/<languagename>_<version>.zip  (with --release)
+#   <output-dir>/<languagename>_<version>.zip  (with --create or --gh-release)
 #   A validator report on stdout                (with --check)
+#   A GitHub Release named after the phpBB version, with the zip attached
+#   (with --gh-release). HEAD must already be pushed to GitHub. A version
+#   ending in -dev is a rolling prerelease updated in place on each run; any
+#   other existing tag or release is an error.
 #
 # Exit status: 0 on success, 1 on failure (including failed validation),
 # 2 on invalid usage.
 #
-# Requirements: git, curl, jq, unzip, zip. For --check also: php, composer.
+# Requirements: git, curl, jq, unzip, zip. For --check also: php, composer,
+# sha256sum. For --gh-release also: gh (authenticated), timeout.
+# lib/github-release.sh must sit next to this script (symlinking the script works).
 
 set -Eeuo pipefail
 
@@ -37,8 +50,16 @@ readonly PACK_DIRS=(ext language styles)
 
 readonly CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/git-release-langpack"
 
-do_release=0
+# Shared release logic lives next to the real script, even when it is run through a symlink.
+SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+readonly SCRIPT_DIR
+# shellcheck source=lib/github-release.sh
+source "$SCRIPT_DIR/lib/github-release.sh"
+
+mode=""
+dry_run=0
 do_check=0
+GHR_SCRATCH=""
 opt_version=""
 opt_line=""
 opt_output_dir=""
@@ -47,17 +68,28 @@ work_dir=""
 
 usage() {
   cat <<'EOF'
-Usage: git-release-langpack.sh [options]
+Usage:
+  git-release-langpack.sh --create [--check]
+  git-release-langpack.sh --gh-release [--check] [--dry-run]
+  git-release-langpack.sh --check
+  git-release-langpack.sh --help
 
 Build a phpBB language pack release zip from the current git commit.
-At least one of --release or --check is required.
+Choose --create, --gh-release, or --check (which can be combined with either).
 
 Operations:
-  -r, --release          Build <languagename>_<version>.zip in the output
+  -C, --create           Build <languagename>_<version>.zip in the output
                          directory.
+  -g, --gh-release       Build the zip and publish it as a GitHub Release named
+                         after the phpBB version. A -dev version is a rolling
+                         prerelease updated in place; any other existing tag
+                         or release is an error.
   -c, --check            Validate the pack with the phpBB Translation Validator
-                         (3.3 line only). Combined with --release, the zip is
-                         only written if validation passes.
+                         (3.3 line only). Combined with --create or
+                         --gh-release, nothing is written or published unless
+                         validation passes.
+  -n, --dry-run          With --gh-release, show what would be published
+                         without making changes on GitHub.
 
 Options:
   -v, --version VERSION  phpBB version to name and validate against, for
@@ -77,8 +109,9 @@ Delete that directory to force a fresh download.
 
 Examples:
   git-release-langpack.sh --check
-  git-release-langpack.sh --check --release
-  git-release-langpack.sh --release --version 3.3.16
+  git-release-langpack.sh --create --check
+  git-release-langpack.sh --create --version 3.3.16
+  git-release-langpack.sh --gh-release --check --dry-run
 EOF
 }
 
@@ -97,6 +130,8 @@ cleanup() {
   if [[ -n "$work_dir" && -d "$work_dir" ]]; then
     rm -rf -- "$work_dir"
   fi
+  [[ -z "$GHR_SCRATCH" ]] || rm -rf -- "$GHR_SCRATCH"
+  ghr_report_incomplete
 }
 
 # Fail early with a clear message when a required program is missing.
@@ -115,8 +150,13 @@ parse_args() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -r|--release) do_release=1 ;;
+      -C|--create|-g|--gh-release)
+        [[ -z "$mode" ]] || usage_error "only one of --create or --gh-release may be used"
+        case "$1" in -C|--create) mode="create" ;; *) mode="gh-release" ;; esac
+        ;;
+      -r|--release) usage_error "--release was renamed to --create" ;;
       -c|--check) do_check=1 ;;
+      -n|--dry-run) dry_run=1 ;;
       -v|--version)
         [[ $# -ge 2 ]] || usage_error "$1 needs a value"
         opt_version="$2"
@@ -141,8 +181,11 @@ parse_args() {
     shift
   done
 
-  if [[ $do_release -eq 0 && $do_check -eq 0 ]]; then
-    usage_error "choose an operation: --release and/or --check"
+  if [[ -z "$mode" && $do_check -eq 0 ]]; then
+    usage_error "choose an operation: --create, --gh-release, or --check"
+  fi
+  if [[ $dry_run -eq 1 && "$mode" != "gh-release" ]]; then
+    usage_error "--dry-run requires --gh-release"
   fi
   if [[ -n "$opt_version" && ! "$opt_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*$ ]]; then
     usage_error "--version must look like 3.3.17, got: $opt_version"
@@ -334,6 +377,10 @@ main() {
   if [[ $do_check -eq 1 ]]; then
     require_commands php composer sha256sum
   fi
+  if [[ "$mode" == "gh-release" ]]; then
+    require_commands gh timeout
+    gh auth status >/dev/null 2>&1 || die "GitHub CLI is not authenticated; run: gh auth login"
+  fi
 
   local repo_root
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
@@ -341,8 +388,11 @@ main() {
   cd "$repo_root"
   git rev-parse --verify -q HEAD >/dev/null || die "the repository has no commits"
   if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    [[ "$mode" != "gh-release" ]] || die "tracked files contain uncommitted changes"
     echo "Warning: uncommitted changes are not included; only HEAD is packaged." >&2
   fi
+  local commit
+  commit="$(git rev-parse HEAD)"
 
   local line version iso name folder
   line="$(resolve_line)"
@@ -359,6 +409,15 @@ main() {
   work_dir="$(mktemp -d)"
   trap cleanup EXIT
 
+  # Check GitHub before building: the repository, the pushed commit, and any
+  # existing release or tag for this version.
+  if [[ "$mode" == "gh-release" ]]; then
+    GHR_SCRATCH="$(mktemp -d)"
+    ghr_resolve_repository ""
+    ghr_require_remote_commit "$commit"
+    ghr_check_existing "$version"
+  fi
+
   local zip_file="$work_dir/$folder.zip"
   build_zip "$zip_file" "$folder"
 
@@ -370,13 +429,32 @@ main() {
       || die "not releasing: the pack does not pass validation"
   fi
 
-  if [[ $do_release -eq 1 ]]; then
+  if [[ -n "$mode" ]]; then
     local out_dir="${opt_output_dir:-$repo_root/../git-exported}"
     mkdir -p "$out_dir"
     out_dir="$(cd "$out_dir" && pwd)"
     mv "$zip_file" "$out_dir/$folder.zip.partial"
     mv "$out_dir/$folder.zip.partial" "$out_dir/$folder.zip"
     echo "Release $folder.zip created at $out_dir/$folder.zip"
+  fi
+
+  if [[ "$mode" == "gh-release" ]]; then
+    echo
+    echo "GitHub release:"
+    printf '  Repository:  %s\n' "$GHR_REPOSITORY"
+    printf '  Tag:         %s\n' "$version"
+    printf '  Commit:      %s\n' "$commit"
+    printf '  Asset:       %s\n' "$folder.zip"
+    echo
+    ghr_generate_notes "$version" "$commit"
+    if [[ $dry_run -eq 1 ]]; then
+      ghr_preview "$version" "$commit"
+      echo
+      echo "Dry run: no GitHub changes made."
+      GHR_COMPLETED=true
+      return
+    fi
+    ghr_publish "$version" "$commit" "$out_dir/$folder.zip"
   fi
 }
 
