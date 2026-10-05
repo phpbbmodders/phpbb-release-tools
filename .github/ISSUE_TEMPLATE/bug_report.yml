@@ -7,8 +7,11 @@ body:
     attributes:
       label: Script
       options:
-        - git-release.sh
+        - git-extensions.sh
+        - git-release-api.sh
+        - git-release-style.sh
         - git-release-langpack.sh
+        - phpbb-test-board
     validations:
       required: true
   - type: textarea

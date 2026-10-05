@@ -1,5 +1,6 @@
 #!/usr/bin/bash
 # Offline release workflow checks using a real Git fixture and a mocked GitHub API.
+# Covers git-release-api.sh and the --gh-release mode of the local release scripts.
 # Usage: tests/test-release-api.sh
 set -Eeuo pipefail
 
@@ -45,6 +46,7 @@ cat >"$FIXTURE_ROOT/bin/gh" <<'MOCK'
 #!/usr/bin/bash
 set -eu
 if [[ "$1" == repo ]]; then echo acme/ext; exit 0; fi
+if [[ "$1" == auth ]]; then exit 0; fi
 endpoint=''
 input=''
 method=GET
@@ -63,6 +65,10 @@ case "$endpoint" in
     if [[ "${SCENARIO:-}" == archived ]]; then archived=true; else archived=false; fi
     jq -n --arg branch "$branch" --argjson archived "$archived" \
       '{full_name:"acme/ext",clone_url:"https://github.com/acme/ext.git",default_branch:$branch,archived:$archived}' ;;
+  repos/acme/ext/commits/[0-9a-f]*)
+    # A local HEAD is only "on GitHub" when the fixture has it.
+    "$REAL_GIT" -C "$FIXTURE_ROOT/source" cat-file -e "${endpoint##*/}^{commit}" 2>/dev/null || exit 1
+    echo '{}' ;;
   repos/acme/ext/commits/main|repos/acme/ext/commits/master)
     [[ "$endpoint" == */main || "${SCENARIO:-}" == master_branch ]] || exit 1
     [[ "${SCENARIO:-}" != main_failure ]] || exit 1
@@ -220,4 +226,84 @@ jq -e --arg sha "$DEV_COMMIT" '.draft == true and .prerelease == true and .tag_n
 grep -q '^POST repos/acme/ext/git/refs$' "$FIXTURE_ROOT/methods.log"
 grep -q 'Published release:' "$FIXTURE_ROOT/stdout"
 echo 'ok - first dev release is created as a normal prerelease'
+# --gh-release from a local checkout, through the same shared release logic.
+unset SCENARIO
+git clone -q "$FIXTURE_ROOT/source" "$FIXTURE_ROOT/local"
+cd "$FIXTURE_ROOT/local"
+local_zip="$FIXTURE_ROOT/git-exported/acme-ext-1.2.3-a1.zip"
+
+run_local() {
+  : >"$FIXTURE_ROOT/api.log"
+  : >"$FIXTURE_ROOT/methods.log"
+  bash "$root/$1" "${@:2}" >"$FIXTURE_ROOT/stdout" 2>"$FIXTURE_ROOT/stderr"
+}
+
+run_local git-extensions.sh --gh-release --dry-run
+unzip -tq "$local_zip" >/dev/null
+grep -q 'Dry run: no GitHub changes made.' "$FIXTURE_ROOT/stdout"
+if grep -vE '^(GET |POST repos/acme/ext/releases/generate-notes$)' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+echo 'ok - git-extensions.sh --gh-release --dry-run builds the ZIP and makes no GitHub changes'
+
+run_local git-extensions.sh --gh-release
+jq -e --arg sha "$FIXTURE_COMMIT" '.prerelease == true and .tag_name == "1.2.3-a1" and .target_commitish == $sha' "$FIXTURE_ROOT/create.json" >/dev/null
+cmp "$local_zip" "$FIXTURE_ROOT/uploaded.zip"
+grep -q 'Published release: https://github.com/acme/ext/releases/tag/1.2.3-a1' "$FIXTURE_ROOT/stdout"
+echo 'ok - git-extensions.sh --gh-release publishes local HEAD as a prerelease'
+
+export SCENARIO=existing_release
+if run_local git-extensions.sh --gh-release; then exit 1; fi
+grep -q 'Release 1.2.3-a1 already exists' "$FIXTURE_ROOT/stderr"
+echo 'ok - git-extensions.sh --gh-release rejects an existing non-dev release'
+
+unset SCENARIO
+echo dirty >>included.txt
+if run_local git-extensions.sh --gh-release; then exit 1; fi
+grep -q 'uncommitted changes' "$FIXTURE_ROOT/stderr"
+[[ ! -s "$FIXTURE_ROOT/methods.log" ]]
+git checkout -q -- included.txt
+echo 'ok - git-extensions.sh --gh-release refuses uncommitted changes before contacting GitHub'
+
+git -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m unpushed
+if run_local git-extensions.sh --gh-release; then exit 1; fi
+grep -q 'is not on GitHub; push it before releasing' "$FIXTURE_ROOT/stderr"
+git reset -q --hard origin/main
+echo 'ok - git-extensions.sh --gh-release refuses a commit that is not pushed'
+
+git checkout -q dev
+export SCENARIO=dev_existing
+run_local git-extensions.sh --gh-release
+grep -q '^PATCH repos/acme/ext/git/refs/tags/1.2.3-dev$' "$FIXTURE_ROOT/methods.log"
+grep -q 'Updated rolling release: https://github.com/acme/ext/releases/tag/1.2.3-dev' "$FIXTURE_ROOT/stdout"
+cmp "$FIXTURE_ROOT/git-exported/acme-ext-1.2.3-dev.zip" "$FIXTURE_ROOT/uploaded.zip"
+echo 'ok - git-extensions.sh --gh-release updates the rolling -dev release in place'
+
+# A style and a language pack, committed into the fixture so their commits count as pushed.
+unset SCENARIO
+git -C "$FIXTURE_ROOT/source" checkout -q --orphan style
+git -C "$FIXTURE_ROOT/source" rm -rqf --cached .
+printf 'name = AcmeStyle\nstyle_version = 1.2.3-a1\n' >"$FIXTURE_ROOT/source/style.cfg"
+git -C "$FIXTURE_ROOT/source" add style.cfg
+git -C "$FIXTURE_ROOT/source" -c user.name=test -c user.email=test@example.com commit -qm style
+git clone -q -b style "$FIXTURE_ROOT/source" "$FIXTURE_ROOT/style"
+cd "$FIXTURE_ROOT/style"
+run_local git-release-style.sh --gh-release
+jq -e '.prerelease == true and .tag_name == "1.2.3-a1"' "$FIXTURE_ROOT/create.json" >/dev/null
+unzip -Z1 "$FIXTURE_ROOT/uploaded.zip" | grep -q "^AcmeStyle/style.cfg$"
+grep -q 'Published release:' "$FIXTURE_ROOT/stdout"
+echo 'ok - git-release-style.sh --gh-release publishes a prerelease'
+
+git -C "$FIXTURE_ROOT/source" checkout -q --orphan langpack
+git -C "$FIXTURE_ROOT/source" rm -rqf --cached .
+mkdir -p "$FIXTURE_ROOT/source/language/xx"
+printf 'Example Language\nExample\n' >"$FIXTURE_ROOT/source/language/xx/iso.txt"
+git -C "$FIXTURE_ROOT/source" add language
+git -C "$FIXTURE_ROOT/source" -c user.name=test -c user.email=test@example.com commit -qm langpack
+git clone -q -b langpack "$FIXTURE_ROOT/source" "$FIXTURE_ROOT/langpack"
+cd "$FIXTURE_ROOT/langpack"
+run_local git-release-langpack.sh --gh-release --version 1.2.3-a1
+jq -e '.prerelease == true and .tag_name == "1.2.3-a1"' "$FIXTURE_ROOT/create.json" >/dev/null
+unzip -Z1 "$FIXTURE_ROOT/uploaded.zip" | grep -q '^example_language_1.2.3-a1/language/xx/iso.txt$'
+grep -q 'Published release:' "$FIXTURE_ROOT/stdout"
+echo 'ok - git-release-langpack.sh --gh-release publishes the pack'
+
 echo 'All API release tests passed.'
