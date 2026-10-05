@@ -1,8 +1,9 @@
 #!/usr/bin/bash
-# Package remote main and publish a GitHub Release with generated release notes.
+# Package the remote default branch and publish a GitHub Release with generated release notes.
 # Uses committed composer.json metadata and git archive's export-ignore rules.
-# A -dev version is a rolling prerelease: each --release moves its tag to remote
-# main and updates the same release's notes and ZIP. Other versions are immutable.
+# A -dev version is a rolling prerelease: each --release moves its tag to the
+# remote default branch and updates the same release's notes and ZIP. Other
+# versions are immutable.
 # Requires git, gh (authenticated to github.com), jq, zip, and timeout.
 # Usage: git-release-api.sh --dry-run|--release [--repo OWNER/REPO] [--output DIR]
 # Exit status: 0 on success, 1 on operational failure, 2 on invalid arguments.
@@ -20,7 +21,8 @@ Usage: git-release-api.sh --dry-run|--release [options]
   -o, --output DIR      ZIP destination (defaults to ../git-exported).
   -h, --help            Show help.
 
-Uses remote main, not the local checkout. The composer.json version becomes
+Uses the repository's default branch on GitHub (for example main or master),
+not the local checkout. The composer.json version becomes
 the tag and release name. Alpha, beta, RC, and dev versions are prereleases.
 
 Stable, alpha, beta, and RC releases are immutable: an existing release or tag
@@ -28,7 +30,7 @@ is rejected, and an upload/publication failure leaves the draft release for
 inspection.
 
 A version ending in -dev is a rolling prerelease. The first --release creates
-it; each later --release moves its tag to remote main, regenerates its notes,
+it; each later --release moves its tag to the default branch, regenerates its notes,
 and replaces its ZIP in the same release, keeping its URL. --dry-run never
 changes the tag, release, or asset.
 HELP
@@ -93,14 +95,22 @@ api "repos/$repository" >"$scratch/repository.json"
 repository=$(jq -er '.full_name' "$scratch/repository.json")
 clone_url=$(jq -er '.clone_url' "$scratch/repository.json")
 [[ "$clone_url" == "https://github.com/$repository.git" ]] || fail 'Unexpected GitHub clone URL.'
-api "repos/$repository/commits/main" >"$scratch/commit.json"
+# GitHub answers writes to an archived repository with a misleading 404.
+if jq -e '.archived == true' "$scratch/repository.json" >/dev/null; then
+  fail "$repository is archived; unarchive it on GitHub before releasing."
+fi
+branch=$(jq -er '.default_branch | select(type == "string")' "$scratch/repository.json")
+# Reject anything git would not accept as a branch name before using it in a URL.
+git check-ref-format --branch "$branch" >/dev/null 2>&1 || fail 'Unexpected default branch name.'
+[[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || fail 'Unexpected default branch name.'
+api "repos/$repository/commits/$branch" >"$scratch/commit.json"
 commit=$(jq -er '.sha | select(test("^[0-9a-f]{40}$"))' "$scratch/commit.json")
 
 # Isolate the remote snapshot so packaging cannot alter the user's checkout.
 git init -q "$scratch/source"
 timeout 120 git -C "$scratch/source" -c credential.helper= \
   -c 'credential.helper=!gh auth git-credential' fetch -q --depth=1 "$clone_url" "$commit"
-[[ "$(git -C "$scratch/source" rev-parse FETCH_HEAD)" == "$commit" ]] || fail 'Fetched commit does not match remote main.'
+[[ "$(git -C "$scratch/source" rev-parse FETCH_HEAD)" == "$commit" ]] || fail "Fetched commit does not match remote $branch."
 git -C "$scratch/source" show "$commit:composer.json" >"$scratch/composer.json"
 package=$(jq -er '.name | select(type == "string")' "$scratch/composer.json")
 version=$(jq -er '.version | select(type == "string")' "$scratch/composer.json")
@@ -129,7 +139,7 @@ api "repos/$repository/git/matching-refs/tags/$version" >"$scratch/tags.json"
 jq -e 'type == "array"' "$scratch/tags.json" >/dev/null || fail 'Invalid tag-list response.'
 existing_tag_sha=''
 if jq -e --arg ref "refs/tags/$version" 'any(.[]; .ref == $ref)' "$scratch/tags.json" >/dev/null; then
-  [[ "$rolling" == true ]] || fail "Tag $version already exists; update composer.json on main before publishing another version."
+  [[ "$rolling" == true ]] || fail "Tag $version already exists; update composer.json on $branch before publishing another version."
   # An annotated tag reports its tag object, which never equals the commit and so counts as moved.
   existing_tag_sha=$(jq -er --arg ref "refs/tags/$version" \
     '.[] | select(.ref == $ref) | .object.sha | select(test("^[0-9a-f]{40}$"))' "$scratch/tags.json") || fail 'Invalid tag response.'
@@ -143,7 +153,7 @@ zip -q -z "$partial" </dev/null
 mv -f -- "$partial" "$output_dir/$filename"
 partial=''
 echo "Package: $output_dir/$filename"
-echo "Source: $repository main at $commit"
+echo "Source: $repository $branch at $commit"
 
 # GitHub ignores target_commitish for an existing tag, so notes follow wherever the tag points.
 generate_notes() {
