@@ -1,3 +1,6 @@
 # phpbb-test-board: its own virtualenv and Python caches
 phpbb-test-board/.venv/
 __pycache__/
+
+# Shared script code; overrides global ignore rules that hide lib/ folders
+!lib/
