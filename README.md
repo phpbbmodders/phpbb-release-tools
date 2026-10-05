@@ -7,10 +7,10 @@ Tools for phpBB packages: Bash scripts that build release ZIPs, an API-based Git
 | Script | Builds | Zip name |
 |---|---|---|
 | [`git-release.sh`](git-release.sh) | A phpBB extension | `<vendor>-<name>-<version>.zip`, from `composer.json` |
-| [`git-release-api.sh`](git-release-api.sh) | A phpBB extension and a GitHub Release from remote `main` | `<vendor>-<name>-<version>.zip`, from committed `composer.json` |
+| [`git-release-api.sh`](git-release-api.sh) | A phpBB extension and a GitHub Release from the remote default branch | `<vendor>-<name>-<version>.zip`, from committed `composer.json` |
 | [`git-release-langpack.sh`](git-release-langpack.sh) | A phpBB language pack for the phpBB.com Customisation Database | `<languagename>_<version>.zip` |
 
-`git-release.sh` and `git-release-langpack.sh` build from the current git commit (`HEAD`); `git-release-api.sh` builds from remote `main`. Uncommitted changes are not included. Files marked `export-ignore` in `.gitattributes` are left out. They were written and tested on Linux.
+`git-release.sh` and `git-release-langpack.sh` build from the current git commit (`HEAD`); `git-release-api.sh` builds from the repository's default branch on GitHub (`main`, `master`, or whatever it is set to). Uncommitted changes are not included. Files marked `export-ignore` in `.gitattributes` are left out. They were written and tested on Linux.
 
 ## Requirements
 
@@ -33,7 +33,7 @@ The zip is written to `../git-exported`, next to the repository. Its top folder 
 
 ### GitHub releases: `git-release-api.sh`
 
-Uses the GitHub API to resolve remote `main`, generate release notes, create a draft release, upload the package, and publish the release. An isolated Git fetch supplies that exact commit for `git archive`, preserving the original script's folder layout and exclusions. The local checkout is not changed.
+Uses the GitHub API to resolve the latest commit on the repository's default branch, generate release notes, create a draft release, upload the package, and publish the release. An isolated Git fetch supplies that exact commit for `git archive`, preserving the original script's folder layout and exclusions. The local checkout is not changed. Archived repositories are rejected, since GitHub does not allow releases on them.
 
 Run from the extension repository, or supply `--repo OWNER/REPO`:
 
@@ -44,9 +44,9 @@ git-release-api.sh --release --repo phpbbmodders/phpbb-ext-wiki
 
 `--dry-run` builds the local ZIP and previews GitHub-generated release notes without creating a tag, release, or asset. `--release` publishes it. With no arguments the script prints help. Use `--output DIR` to change the ZIP destination from `../git-exported`.
 
-The version in `main`'s `composer.json` is the tag and release name. Alpha, beta, RC, and dev versions are marked as prereleases. For stable, alpha, beta, and RC versions an existing tag or release stops the operation; those releases and assets are never replaced. Packaging replaces a same-named local ZIP only after the archive is complete.
+The version in that commit's `composer.json` is the tag and release name. Alpha, beta, RC, and dev versions are marked as prereleases. For stable, alpha, beta, and RC versions an existing tag or release stops the operation; those releases and assets are never replaced. Packaging replaces a same-named local ZIP only after the archive is complete.
 
-A version ending in `-dev` is a rolling prerelease. The first `--release` creates it like any other release. Each later `--release` moves the tag to the current remote `main`, regenerates the release notes, and replaces the ZIP in the same GitHub release, so its URL stays the same. The new ZIP is uploaded under a temporary name and only replaces the old one after the upload is confirmed. The script prints `Updated rolling release:` for this path and `Published release:` for a new release. `--dry-run` shows what would change but never touches the tag, release, or asset. If the tag has to move, the dry-run notes still reflect where the tag points now.
+A version ending in `-dev` is a rolling prerelease. The first `--release` creates it like any other release. Each later `--release` moves the tag to the current default-branch commit, regenerates the release notes, and replaces the ZIP in the same GitHub release, so its URL stays the same. The new ZIP is uploaded under a temporary name and only replaces the old one after the upload is confirmed. The script prints `Updated rolling release:` for this path and `Published release:` for a new release. `--dry-run` shows what would change but never touches the tag, release, or asset. If the tag has to move, the dry-run notes still reflect where the tag points now.
 
 The script reserves a tag at the pinned commit before creating the release. A failure after tag creation may leave that tag without a release. The release stays a draft until its asset upload is confirmed. If uploading or publishing fails, the script reports the release URL and exits with an error. Inspect the remote state before retrying. For stable, alpha, beta, and RC versions a retry stops when it finds the existing tag or release. For a `-dev` version a retry reuses the leftover tag or draft release and finishes the update. A publication timeout may mean publication succeeded but could not be confirmed. Requests have finite timeouts and remote write requests are not retried automatically.
 

@@ -59,8 +59,12 @@ echo "$endpoint ${input:+with-input}" >>"$FIXTURE_ROOT/api.log"
 echo "$method $endpoint" >>"$FIXTURE_ROOT/methods.log"
 case "$endpoint" in
   repos/acme/ext)
-    echo '{"full_name":"acme/ext","clone_url":"https://github.com/acme/ext.git"}' ;;
-  repos/acme/ext/commits/main)
+    if [[ "${SCENARIO:-}" == master_branch ]]; then branch=master; else branch=main; fi
+    if [[ "${SCENARIO:-}" == archived ]]; then archived=true; else archived=false; fi
+    jq -n --arg branch "$branch" --argjson archived "$archived" \
+      '{full_name:"acme/ext",clone_url:"https://github.com/acme/ext.git",default_branch:$branch,archived:$archived}' ;;
+  repos/acme/ext/commits/main|repos/acme/ext/commits/master)
+    [[ "$endpoint" == */main || "${SCENARIO:-}" == master_branch ]] || exit 1
     [[ "${SCENARIO:-}" != main_failure ]] || exit 1
     if [[ "${SCENARIO:-}" == dev_* ]]; then sha="$DEV_COMMIT"; else sha="$FIXTURE_COMMIT"; fi
     jq -n --arg sha "$sha" '{sha:$sha}' ;;
@@ -168,6 +172,18 @@ for scenario in upload_failure publish_failure; do
   fi
   echo "ok - $scenario reports the draft and never claims success"
 done
+
+export SCENARIO=master_branch
+run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
+grep -q '^GET repos/acme/ext/commits/master$' "$FIXTURE_ROOT/methods.log"
+grep -q "Source: acme/ext master at $FIXTURE_COMMIT" "$FIXTURE_ROOT/stdout"
+echo 'ok - a repository whose default branch is master is packaged from master'
+
+export SCENARIO=archived
+if run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"; then exit 1; fi
+grep -q 'acme/ext is archived' "$FIXTURE_ROOT/stderr"
+[[ "$(cat "$FIXTURE_ROOT/methods.log")" == 'GET repos/acme/ext' ]]
+echo 'ok - an archived repository is rejected before any other request'
 
 dev_zip="$FIXTURE_ROOT/output/acme-ext-1.2.3-dev.zip"
 export SCENARIO=dev_existing
