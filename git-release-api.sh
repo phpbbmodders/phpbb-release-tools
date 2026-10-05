@@ -243,5 +243,7 @@ jq -e --arg name "$filename" --argjson size "$size" \
   '.name == $name and .state == "uploaded" and .size == $size' "$scratch/asset.json" >/dev/null || fail 'Upload response does not match the package.'
 api "repos/$repository/releases/$release_id" --method PATCH -F draft=false >"$scratch/published.json"
 jq -e '.draft == false' "$scratch/published.json" >/dev/null || fail 'Publication was not confirmed.'
+# A draft's URL uses a temporary untagged-* name; report the published one.
+release_url=$(jq -er '.html_url' "$scratch/published.json")
 completed=true
 echo "Published release: $release_url"

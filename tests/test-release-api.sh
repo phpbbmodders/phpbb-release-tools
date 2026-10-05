@@ -98,14 +98,14 @@ case "$endpoint" in
     echo '{"ref":"refs/tags/1.2.3-a1"}' ;;
   repos/acme/ext/releases)
     cp "$input" "$FIXTURE_ROOT/create.json"
-    echo '{"id":123,"html_url":"https://github.com/acme/ext/releases/tag/1.2.3-a1"}' ;;
+    echo '{"id":123,"html_url":"https://github.com/acme/ext/releases/tag/untagged-0123"}' ;;
   https://uploads.github.com/repos/acme/ext/releases/*/assets?name=*)
     [[ "${SCENARIO:-}" != upload_failure ]] || exit 1
     cp "$input" "$FIXTURE_ROOT/uploaded.zip"
     jq -n --arg name "${endpoint##*name=}" --argjson size "$(stat -c %s "$input")" '{id:9,name:$name,state:"uploaded",size:$size}' ;;
   repos/acme/ext/releases/123)
     [[ "${SCENARIO:-}" != publish_failure ]] || exit 1
-    echo '{"draft":false}' ;;
+    echo '{"draft":false,"html_url":"https://github.com/acme/ext/releases/tag/1.2.3-a1"}' ;;
   *) echo "Unexpected API endpoint: $endpoint" >&2; exit 1 ;;
 esac
 MOCK
@@ -162,7 +162,7 @@ echo 'ok - failed packaging preserves an existing ZIP and removes partial files'
 for scenario in upload_failure publish_failure; do
   export SCENARIO="$scenario"
   if run --release --repo acme/ext --output "$FIXTURE_ROOT/output"; then exit 1; fi
-  grep -q 'Release workflow incomplete. Inspect the release before retrying: https://github.com/acme/ext/releases/tag/1.2.3-a1' "$FIXTURE_ROOT/stderr"
+  grep -q 'Release workflow incomplete. Inspect the release before retrying: https://github.com/acme/ext/releases/tag/untagged-0123' "$FIXTURE_ROOT/stderr"
   if [[ "$scenario" == upload_failure ]]; then
     if grep -q '^repos/acme/ext/releases/123 ' "$FIXTURE_ROOT/api.log"; then exit 1; fi
   fi
