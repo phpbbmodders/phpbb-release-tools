@@ -129,7 +129,15 @@ def check_groupwarn(b: Board) -> None:
 
 
 def check_documentation(b: Board) -> None:
-    build = b.root / "ext/phpbbmodders/documentation/docs-build"
+    # The default build location moved over time (ext/.../docs-build, then
+    # store/phpbbmodders_documentation), so write the probe build wherever
+    # the installed version is configured to look.
+    rows = b.sql("SELECT config_value FROM phpbb_config "
+                 "WHERE config_name = 'phpbbmodders_documentation_docs_path'")
+    if not rows:
+        ok(False, "docs build path is configured")
+        return
+    build = b.root / rows[0][0]
     for sub, marker in (("en", "PROBE-DOCS-HOME"), ("en/userguide", "PROBE-DOCS-SECTION")):
         (build / sub).mkdir(parents=True, exist_ok=True)
         (build / sub / "index.html").write_text(
@@ -147,6 +155,16 @@ def check_documentation(b: Board) -> None:
     ok(r.status_code == 200 and "PROBE-DOCS-HOME" in r.text, f"guest can read the docs home ({r.status_code})")
     r = g.get(f"{b.base}/app.php/documentation/en/userguide")
     ok(r.status_code == 200 and "PROBE-DOCS-SECTION" in r.text, f"guest can read a section page ({r.status_code})")
+    # A guest who loses access gets the login form rather than a bare 403.
+    b.sql("DELETE FROM phpbb_acl_groups "
+          "WHERE group_id = (SELECT group_id FROM phpbb_groups WHERE group_name = 'GUESTS') "
+          "AND auth_option_id = (SELECT auth_option_id FROM phpbb_acl_options "
+          "WHERE auth_option = 'u_phpbbmodders_documentation_userguide')")
+    b.sql("UPDATE phpbb_users SET user_permissions = ''")
+    b.purge_cache()
+    r = requests.Session().get(f"{b.base}/app.php/documentation/en/userguide")
+    ok('name="username"' in r.text and "PROBE-DOCS-SECTION" not in r.text,
+       f"guest without access gets the login form ({r.status_code})")
 
 
 def check_separatebots(b: Board) -> None:
