@@ -11,6 +11,7 @@ Test users get random throwaway passwords that are never printed.
 Exit status: 0 if every check passed, 1 if any failed, 2 for bad arguments.
 """
 import argparse
+import json
 import re
 import secrets
 import shutil
@@ -155,6 +156,18 @@ def check_documentation(b: Board) -> None:
     ok(r.status_code == 200 and "PROBE-DOCS-HOME" in r.text, f"guest can read the docs home ({r.status_code})")
     r = g.get(f"{b.base}/app.php/documentation/en/userguide")
     ok(r.status_code == 200 and "PROBE-DOCS-SECTION" in r.text, f"guest can read a section page ({r.status_code})")
+    # Versions with a server-side search fallback answer a search without
+    # JavaScript from <lang>/<section>/search-index.json.
+    helper = b.root / "ext/phpbbmodders/documentation/controller/documentation_helper.php"
+    if "SEARCH_INDEX_FILE" in helper.read_text(encoding="utf-8"):
+        (build / "en/userguide/search-index.json").write_text(json.dumps(
+            [{"url": "/en/userguide/", "title": "PROBE-SEARCH-TITLE", "text": "probe searchable words"}]))
+        r = g.get(f"{b.base}/app.php/documentation-search/en", params={"q": "searchable words"})
+        ok(r.status_code == 200 and "PROBE-SEARCH-TITLE" in r.text and "documentation/en/userguide" in r.text,
+           f"search without JavaScript returns server results ({r.status_code})")
+        r = g.get(f"{b.base}/app.php/documentation-search/en", params={"q": "nothing matches this"})
+        ok(r.status_code == 200 and "PROBE-SEARCH-TITLE" not in r.text and 'role="status"' in r.text,
+           f"search without JavaScript reports no results ({r.status_code})")
     # A guest who loses access gets the login form rather than a bare 403.
     b.sql("DELETE FROM phpbb_acl_groups "
           "WHERE group_id = (SELECT group_id FROM phpbb_groups WHERE group_name = 'GUESTS') "
