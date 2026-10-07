@@ -89,6 +89,20 @@ phpbb-test-board/screenshots.py path/to/ProMinoDeux -o path/to/ProMinoDeux/docs/
   --seed path/to/seed-forum/bin/seed-standard-fixtures.php
 ```
 
+### `template_a11y.py`: labels on icon-only links and buttons
+
+```bash
+phpbb-test-board/template_a11y.py path/to/project [more projects...]
+```
+
+Scans an extension's or style's templates (`styles/`, `adm/style/`, or a style's `template/`) for links and buttons that show only an icon. Each needs a `title` for the tooltip and screen-reader text, a `<span class="sr-only">` inside it or an `aria-label`, both from a language string:
+
+```html
+<a href="{U_CHECK}" title="{L_CHECK}"><i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">{L_CHECK}</span></a>
+```
+
+A `title` on the icon itself, phpBB's ACP pattern, counts as the tooltip, and a link around an image with alt text passes. Problems are printed as `FILE:LINE: message`, and the exit status is 1 if there are any. It needs no board and only Python's standard library.
+
 ## Extensions that need another extension
 
 Pass the other extension's checkout with `--with`. Repeat it for several, in the order they must be enabled:
