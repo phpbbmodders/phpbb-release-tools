@@ -89,6 +89,28 @@ phpbb-test-board/screenshots.py path/to/ProMinoDeux -o path/to/ProMinoDeux/docs/
   --seed path/to/seed-forum/bin/seed-standard-fixtures.php
 ```
 
+### `rename_upgrade.py`: upgrading from an old vendor name
+
+```bash
+phpbb-test-board/rename_upgrade.py path/to/extension@OLD_REF path/to/extension[@REF] [--setting NAME=VALUE]
+```
+
+For an extension that moved to a new composer name and PHP namespace, for example `rmcgirr83/stopforumspam` to `phpbbmodders/stopforumspam`. phpBB records migrations by class name, so without help it treats the renamed extension as new and runs every migration again, which resets its settings. The renamed version's `ext.php` has to move the old records over first; this script checks that it does.
+
+It installs the old version, then upgrades the way an admin would: the new version must refuse to enable while the old one is enabled, then the old one is disabled, the new one enabled and the old files deleted. It then checks that:
+- the migration history moved to the new name and kept its original timestamps, so nothing ran again;
+- no migration name or dependency, ACP module, notification type or setting name still uses the old name;
+- there are no duplicate ACP modules, and the old extension's record is gone;
+- every setting the old version added is still there, and `--setting` (changed before the upgrade) kept its value;
+- the board index, a topic and the extension's ACP pages load with no PHP errors.
+
+For example, Stop Forum Spam from its last `rmcgirr83` release:
+
+```bash
+phpbb-test-board/rename_upgrade.py path/to/stopforumspam@0af40a1 path/to/stopforumspam \
+  --setting sfs_api_key=UPGRADE-TEST
+```
+
 ### `template_a11y.py`: labels on icon-only links and buttons
 
 ```bash

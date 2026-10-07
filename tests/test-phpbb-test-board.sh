@@ -81,6 +81,24 @@ for script in smoke_test.py feature_checks.py screenshots.py; do
     exits_with 2 "$tools/$script" "$tmp/repo" --with "$tmp" -b "$tmp"
 done
 
+# rename_upgrade.py: arguments are checked before any board is touched
+renamed="$tmp/renamed-ext"
+git init -q "$renamed"
+printf '{"name": "vendor/example", "type": "phpbb-extension"}\n' >"$renamed/composer.json"
+git -C "$renamed" add composer.json
+git -C "$renamed" -c user.name=test -c user.email=test@example.com commit -qm "test extension"
+check "rename_upgrade.py --help exits 0" exits_with 0 "$tools/rename_upgrade.py" --help
+check "rename_upgrade.py --help describes --setting" output_has "--setting NAME=VALUE" "$tools/rename_upgrade.py" --help
+check "rename_upgrade.py without arguments exits 2" exits_with 2 "$tools/rename_upgrade.py"
+check "rename_upgrade.py with a non-git directory exits 2" \
+  exits_with 2 "$tools/rename_upgrade.py" "$tmp" "$renamed" -b "$tmp"
+check "rename_upgrade.py with the same name twice exits 2" \
+  exits_with 2 "$tools/rename_upgrade.py" "$renamed" "$renamed" -b "$tmp"
+check "rename_upgrade.py with the same name twice says why" \
+  output_has "tests a change of name" "$tools/rename_upgrade.py" "$renamed" "$renamed" -b "$tmp"
+check "rename_upgrade.py --with a non-git directory exits 2" \
+  exits_with 2 "$tools/rename_upgrade.py" "$renamed" "$renamed" --with "$tmp" -b "$tmp"
+
 # template_a11y.py: icon-only links and buttons need a tooltip and screen-reader text
 a11y="$tmp/a11y-ext/styles/prosilver/template/event"
 mkdir -p "$a11y" "$tmp/a11y-good/styles/all/template"

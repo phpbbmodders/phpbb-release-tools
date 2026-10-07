@@ -89,7 +89,7 @@ The tag is reserved at the pinned commit before the release is created. A failur
 
 ### Testing extensions and styles: `phpbb-test-board/`
 
-Builds a local phpBB 3.3 board on SQLite and tests extensions on it: `smoke_test.py` checks that an extension doesn't break any page, `feature_checks.py` exercises its main feature, and `screenshots.py` takes documentation screenshots of extensions and styles, and `template_a11y.py` checks that icon-only links and buttons have a tooltip and screen-reader text. For local testing only.
+Builds a local phpBB 3.3 board on SQLite and tests extensions on it: `smoke_test.py` checks that an extension doesn't break any page, `feature_checks.py` exercises its main feature, and `screenshots.py` takes documentation screenshots of extensions and styles, `rename_upgrade.py` checks that an extension moved to a new vendor name upgrades cleanly from the old one, and `template_a11y.py` checks that icon-only links and buttons have a tooltip and screen-reader text. For local testing only.
 
 ```bash
 phpbb-test-board/setup-board.sh -d ~/phpbb-test-board
