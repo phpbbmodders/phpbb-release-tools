@@ -139,6 +139,10 @@ def check_documentation(b: Board) -> None:
         ok(False, "docs build path is configured")
         return
     build = b.root / rows[0][0]
+    # store/ isn't reset between runs the way ext/ is, so start from an
+    # empty build rather than whatever an earlier run left there.
+    if build.resolve().is_relative_to(b.root.resolve()):
+        shutil.rmtree(build, ignore_errors=True)
     for sub, marker in (("en", "PROBE-DOCS-HOME"), ("en/userguide", "PROBE-DOCS-SECTION")):
         (build / sub).mkdir(parents=True, exist_ok=True)
         (build / sub / "index.html").write_text(
