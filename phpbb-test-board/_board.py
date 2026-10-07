@@ -130,6 +130,49 @@ class Board:
         self.installed = []
         self.reset()
 
+    # -- styles ------------------------------------------------------------
+
+    def install_style(self, repo: Path, ref: str) -> tuple:
+        """Copy a style from git into a clean board, install it and make it every user's style.
+
+        The style goes in styles/<name in lowercase letters and digits>/ and
+        is registered directly in the database, the way ACP » Customise »
+        Styles » Install does, which is only acceptable on a disposable test
+        board. Returns (style name, installed path); remove it with
+        remove_style().
+        """
+        self.reset()
+        cfg = style_cfg(repo, ref)
+        name = cfg["name"]
+        directory = re.sub(r"[^a-z0-9]", "", name.lower())
+        target = self.root / "styles" / directory
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(parents=True)
+        tar = subprocess.run(["git", "-C", str(repo), "archive", ref], capture_output=True, check=True).stdout
+        subprocess.run(["tar", "-x", "-C", str(target)], input=tar, check=True)
+
+        parent_id, parent_tree, bitfield = 0, "", ""
+        if cfg.get("parent") and cfg["parent"] != name:
+            rows = self.sql("SELECT style_id, style_path, style_parent_tree, bbcode_bitfield FROM phpbb_styles "
+                            "WHERE style_name = ?", (cfg["parent"],))
+            if not rows:
+                raise RuntimeError(f"parent style {cfg['parent']} is not installed on the board")
+            parent_id, parent_path, grandparents, bitfield = rows[0]
+            parent_tree = f"{grandparents}/{parent_path}" if grandparents else parent_path
+        self.sql("INSERT INTO phpbb_styles (style_name, style_copyright, style_active, style_path, bbcode_bitfield, "
+                 "style_parent_id, style_parent_tree) VALUES (?, ?, 1, ?, ?, ?, ?)",
+                 (name, cfg.get("copyright", ""), directory, bitfield or "kNg=", parent_id, parent_tree))
+        style_id = self.sql("SELECT style_id FROM phpbb_styles WHERE style_path = ?", (directory,))[0][0]
+        self.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'default_style'", (str(style_id),))
+        self.sql("UPDATE phpbb_users SET user_style = ?", (style_id,))
+        self.purge_cache()
+        return name, target
+
+    def remove_style(self, target: Path) -> None:
+        """Remove a style installed by install_style() and restore the clean board."""
+        shutil.rmtree(target, ignore_errors=True)
+        self.reset()
+
     # -- web server and sessions -------------------------------------------
 
     @contextmanager
@@ -213,6 +256,25 @@ def required_packages(repo: Path, ref: str) -> list:
     """
     require = composer_json(repo, ref).get("require", {})
     return sorted(name for name in require if not NOT_EXTENSIONS.match(name))
+
+
+def is_style(repo: Path, ref: str) -> bool:
+    """Whether a checkout at a git ref is a phpBB style (style.cfg at its root)."""
+    return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{ref}:style.cfg"],
+                          capture_output=True).returncode == 0
+
+
+def style_cfg(repo: Path, ref: str) -> dict:
+    """Read a style's style.cfg (name = value lines) at a git ref."""
+    out = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:style.cfg"],
+                         capture_output=True, text=True, check=True).stdout
+    cfg = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            cfg[key.strip()] = value.strip()
+    return cfg
 
 
 def parse_spec(spec: str) -> tuple:
