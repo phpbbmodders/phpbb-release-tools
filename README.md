@@ -96,6 +96,7 @@ phpbb-test-board/setup-board.sh -d ~/phpbb-test-board
 export PHPBB_TEST_BOARD=~/phpbb-test-board
 phpbb-test-board/smoke_test.py path/to/extension --ref origin/main
 phpbb-test-board/feature_checks.py path/to/extension@origin/main
+phpbb-test-board/screenshots.py path/to/extension@origin/main -o path/to/extension/docs/images
 ```
 
 For an extension that needs another one, pass the other extension's checkout with `--with` (repeat it for several, in the order they must be enabled):
@@ -107,6 +108,7 @@ phpbb-test-board/smoke_test.py path/to/sfscompanion --with path/to/stopforumspam
 - `setup-board.sh` installs the current phpBB 3.3 release (or `--version`) with no extensions, and keeps a clean copy of the database so every test starts from the same state. The admin password is generated and stored only in `board.env`.
 - `smoke_test.py` installs the extension from git, loads board pages as a guest and as the admin, the extension's routes, ACP/MCP/UCP modules and cron tasks, then disables, deletes data and re-enables it. It reports any server error, empty page, phpBB debug notice or PHP error-log entry.
 - `feature_checks.py` exercises the main feature of the phpbbmodders extensions listed in its `--help` (for example: a moderator can't warn a user in an unticked group). Add a check for a new extension in its `CHECKS` table.
+- `screenshots.py` saves PNG screenshots of an extension's board and ACP pages for its documentation, using [Playwright](https://playwright.dev/python/) with Chromium on a board named "Example board" (prosilver, English). The pages are listed per extension in its `SHOTS` table. The first run downloads Playwright's Chromium. phpbbmodders/documentation also needs `--build DIR`, a phpbbdocs-hugo build to serve.
 - The board is restored after each run. Each script has `--help`.
 - `--with` extensions are installed and enabled before the extension under test and stay enabled; only the extension under test goes through the disable and delete data round trip. `feature_checks.py` installs a `--with` extension only for the extensions whose `composer.json` requires it. If `composer.json` requires a package you didn't supply, the scripts print a note naming it.
 

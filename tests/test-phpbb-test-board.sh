@@ -51,8 +51,8 @@ check "setup-board.sh without --dir exits 2" exits_with 2 "$tools/setup-board.sh
 check "setup-board.sh unknown option exits 2" exits_with 2 "$tools/setup-board.sh" --bogus
 check "setup-board.sh bad --version exits 2" exits_with 2 "$tools/setup-board.sh" -d "$tmp/board" -v 4.0.0
 
-# smoke_test.py and feature_checks.py
-for script in smoke_test.py feature_checks.py; do
+# smoke_test.py, feature_checks.py and screenshots.py
+for script in smoke_test.py feature_checks.py screenshots.py; do
   check "$script --help exits 0" exits_with 0 "$tools/$script" --help
   check "$script without arguments exits 2" exits_with 2 "$tools/$script"
   check "$script with a non-git directory exits 2" exits_with 2 "$tools/$script" "$tmp" -b "$tmp"
@@ -68,7 +68,10 @@ check "feature_checks.py with a missing board.env exits 1" \
   exits_with 1 "$tools/feature_checks.py" "$tmp/repo" -b "$tmp/no-board"
 check "feature_checks.py --help lists the extensions with checks" \
   output_has "phpbbmodders/groupwarn" "$tools/feature_checks.py" --help
-for script in smoke_test.py feature_checks.py; do
+check "screenshots.py --help lists the extensions with screenshots" \
+  output_has "phpbbmodders/documentation" "$tools/screenshots.py" --help
+check "screenshots.py without --out exits 2" exits_with 2 "$tools/screenshots.py" "$tmp/repo"
+for script in smoke_test.py feature_checks.py screenshots.py; do
   check "$script --help describes --with" output_has "--with PATH[@REF]" "$tools/$script" --help
   check "$script --with a non-git directory exits 2" \
     exits_with 2 "$tools/$script" "$tmp/repo" --with "$tmp" -b "$tmp"
