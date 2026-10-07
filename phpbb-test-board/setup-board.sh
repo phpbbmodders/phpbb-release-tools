@@ -1,7 +1,8 @@
 #!/usr/bin/bash
 # setup-board.sh
 #
-# Builds a local phpBB test board for smoke_test.py and feature_checks.py.
+# Builds a local phpBB test board for smoke_test.py, feature_checks.py and
+# screenshots.py.
 #
 # Clones a phpBB release (default: the current stable 3.3 release from
 # https://version.phpbb.com/phpbb/versions.json), installs its Composer
@@ -24,7 +25,8 @@ usage() {
   cat <<'EOF'
 Usage: setup-board.sh -d DIR [-v VERSION] [-f]
 
-Build a local phpBB test board for smoke_test.py and feature_checks.py.
+Build a local phpBB test board for smoke_test.py, feature_checks.py and
+screenshots.py.
 
 Options:
   -d, --dir DIR          directory to build the board in (required)

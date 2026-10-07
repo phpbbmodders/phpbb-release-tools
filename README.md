@@ -1,6 +1,6 @@
 # phpbb-release-tools
 
-Tools for phpBB packages: Bash scripts that build release ZIPs and publish them as GitHub Releases, and a local test board for smoke-testing extensions (`phpbb-test-board/`).
+Tools for phpBB packages: Bash scripts that build release ZIPs and publish them as GitHub Releases, and a local test board for testing extensions and styles and taking their documentation screenshots (`phpbb-test-board/`).
 
 ## Tools
 
@@ -22,7 +22,7 @@ The scripts share their GitHub release code in [`lib/github-release.sh`](lib/git
 - `git-release-langpack.sh`: `git`, `curl`, `jq`, `unzip`, `zip`. For `--check` also `php`, `composer` and `sha256sum`.
 - `git-release-api.sh`: `git`, `jq`, `zip`, and GNU coreutils (`timeout`, `mktemp`, `stat`).
 - `--gh-release` and `git-release-api.sh` also need an authenticated GitHub CLI (`gh`), `jq` and `timeout`, with permission to create releases and upload assets.
-- `phpbb-test-board/`: `git`, `php` (with the `sqlite3` extension), `composer`, `curl`, `jq`, `openssl`, Python 3 with `venv`, and ImageMagick's `convert` for the reassignthumbs feature check. The Python scripts create and use their own virtualenv (`phpbb-test-board/.venv`) on first run.
+- `phpbb-test-board/`: see [its README](phpbb-test-board/README.md#requirements).
 
 ## Usage
 
@@ -87,30 +87,17 @@ A version ending in `-dev` is a rolling prerelease. The first release creates it
 
 The tag is reserved at the pinned commit before the release is created. A failure after tag creation may leave that tag without a release. The release stays a draft until its asset upload is confirmed. If uploading or publishing fails, the script reports the release URL and exits with an error. Inspect the remote state before retrying. For stable, alpha, beta, and RC versions a retry stops when it finds the existing tag or release. For a `-dev` version a retry reuses the leftover tag or draft release and finishes the update. A publication timeout may mean publication succeeded but could not be confirmed. Requests have finite timeouts and remote write requests are not retried automatically.
 
-### Testing extensions: `phpbb-test-board/`
+### Testing extensions and styles: `phpbb-test-board/`
 
-Builds a local phpBB board on SQLite and runs an extension on it with PHP error logging on, to catch problems that validation and syntax checks miss, such as pages that crash at runtime, forms that can never submit, or an extension that can't be enabled on a fresh board. For local testing only; never expose the board to a network.
+Builds a local phpBB 3.3 board on SQLite and tests extensions on it: `smoke_test.py` checks that an extension doesn't break any page, `feature_checks.py` exercises its main feature, and `screenshots.py` takes documentation screenshots of extensions and styles. For local testing only.
 
 ```bash
 phpbb-test-board/setup-board.sh -d ~/phpbb-test-board
 export PHPBB_TEST_BOARD=~/phpbb-test-board
 phpbb-test-board/smoke_test.py path/to/extension --ref origin/main
-phpbb-test-board/feature_checks.py path/to/extension@origin/main
-phpbb-test-board/screenshots.py path/to/extension@origin/main -o path/to/extension/docs/images
 ```
 
-For an extension that needs another one, pass the other extension's checkout with `--with` (repeat it for several, in the order they must be enabled):
-
-```bash
-phpbb-test-board/smoke_test.py path/to/sfscompanion --with path/to/stopforumspam
-```
-
-- `setup-board.sh` installs the current phpBB 3.3 release (or `--version`) with no extensions, and keeps a clean copy of the database so every test starts from the same state. The admin password is generated and stored only in `board.env`.
-- `smoke_test.py` installs the extension from git, loads board pages as a guest and as the admin, the extension's routes, ACP/MCP/UCP modules and cron tasks, then disables, deletes data and re-enables it. It reports any server error, empty page, phpBB debug notice or PHP error-log entry.
-- `feature_checks.py` exercises the main feature of the phpbbmodders extensions listed in its `--help` (for example: a moderator can't warn a user in an unticked group). Add a check for a new extension in its `CHECKS` table.
-- `screenshots.py` saves PNG screenshots of an extension's or a style's pages for its documentation, using [Playwright](https://playwright.dev/python/) with Chromium on a board named "Example board" (English). An extension is shown in prosilver, with its board and ACP pages; a checkout with a `style.cfg` is installed as a style and made every user's style. The pages are listed per project in its `SHOTS` table. `--seed SCRIPT` fills the board with forums, topics and users first, for example with [seed-forum](https://github.com/phpbbmodders/seed-forum)'s `bin/seed-standard-fixtures.php`. The first run downloads Playwright's Chromium. phpbbmodders/documentation also needs `--build DIR`, a phpbbdocs-hugo build to serve.
-- The board is restored after each run. Each script has `--help`.
-- `--with` extensions are installed and enabled before the extension under test and stay enabled; only the extension under test goes through the disable and delete data round trip. `feature_checks.py` installs a `--with` extension only for the extensions whose `composer.json` requires it. If `composer.json` requires a package you didn't supply, the scripts print a note naming it.
+See [`phpbb-test-board/README.md`](phpbb-test-board/README.md) for every script and option.
 
 ## Tests
 
