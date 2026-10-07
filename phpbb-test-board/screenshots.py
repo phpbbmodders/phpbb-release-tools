@@ -18,6 +18,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -217,10 +218,29 @@ def shots_sfscompanion(board: Board, shoot: Shooter, args: argparse.Namespace) -
                       for mode, ip, op, data in entries), check=True)
     board.sql("UPDATE phpbb_config SET config_value = '30' WHERE config_name = 'sfsc_expire_days'")
     board.purge_cache()
+    # Example honeypot trips (sfscompanion 1.1+), newest first.
+    now = int(time.time())
+    trips = (
+        (now - 300, "register", "field", 4, 1, "casino_deals", "deals@example.com", "203.0.113.9", "", "", 1, 1),
+        (now - 1800, "register", "time", 1, 1, "seo_expert_99", "seo@example.org", "198.51.100.41", "", "", 0, 0),
+        (now - 5400, "posting", "field", 12, 3, "free_followers", "followers@example.com", "192.0.2.77",
+         "Buy followers today", "Get 10,000 followers in one day. Visit our site for cheap deals...", 0, 0),
+        (now - 9000, "pm", "time", 2, 3, "free_followers", "followers@example.com", "192.0.2.77",
+         "Hello friend", "I have a great business offer for you...", 0, 0),
+    )
+    if board.sql("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'phpbb_sfsc_honeypot_trips'"):
+        for trip in trips:
+            board.sql("INSERT INTO phpbb_sfsc_honeypot_trips (trip_time, trip_form, trip_reason, submit_seconds, "
+                      "user_id, username, user_email, user_ip, user_agent, subject, excerpt, sfs_reported, ip_banned) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Mozilla/5.0 (X11; Linux x86_64)', ?, ?, ?, ?)",
+                      trip)
     page = "adm/index.php?i=-phpbbmodders-sfscompanion-acp-main_module&sid={sid}&mode="
     shoot.shot("sfscompanion-acp-blocks", page + "blocks", admin=True)
     shoot.shot("sfscompanion-acp-errors", page + "errors", admin=True)
     shoot.shot("sfscompanion-acp-settings", page + "settings", admin=True)
+    if board.sql("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'phpbb_sfsc_honeypot_trips'"):
+        shoot.shot("sfscompanion-acp-honeypot", page + "honeypot", admin=True)
+        shoot.shot("sfscompanion-acp-honeypot-trips", page + "honeypot_trips", admin=True)
     member = board.sql("SELECT user_id FROM phpbb_users WHERE user_type = 0 AND user_id <> 2 "
                        "ORDER BY user_posts DESC, user_id LIMIT 1")
     member_id = member[0][0] if member else 2
