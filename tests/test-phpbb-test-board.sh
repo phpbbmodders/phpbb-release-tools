@@ -71,6 +71,10 @@ check "feature_checks.py --help lists the extensions with checks" \
 check "screenshots.py --help lists the extensions with screenshots" \
   output_has "phpbbmodders/documentation" "$tools/screenshots.py" --help
 check "screenshots.py without --out exits 2" exits_with 2 "$tools/screenshots.py" "$tmp/repo"
+check "screenshots.py --help describes --seed" output_has "--seed SCRIPT" "$tools/screenshots.py" --help
+check "screenshots.py --help lists styles with screenshots" output_has "ProMinoDeux" "$tools/screenshots.py" --help
+check "screenshots.py with a missing --seed script exits 2" \
+  exits_with 2 "$tools/screenshots.py" "$tmp/repo" -o "$tmp/out" --seed "$tmp/no-such-seed.php"
 for script in smoke_test.py feature_checks.py screenshots.py; do
   check "$script --help describes --with" output_has "--with PATH[@REF]" "$tools/$script" --help
   check "$script --with a non-git directory exits 2" \

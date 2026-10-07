@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Take documentation screenshots of a phpbbmodders extension on a local test board.
+Take documentation screenshots of a phpbbmodders extension or style on a local test board.
 
-Installs the extension from git into a clean copy of the board (created by
-setup-board.sh), renames the board to "Example board", serves it, and saves
-PNG screenshots of the extension's board pages and ACP pages with Playwright
-(Chromium, prosilver, English). The pages for each extension are listed in
-SHOTS below, keyed by composer name; add an entry for a new extension.
-Restores the board afterwards.
+Installs the extension or style from git into a clean copy of the board
+(created by setup-board.sh), renames the board to "Example board", serves
+it, and saves PNG screenshots with Playwright (Chromium, English). An
+extension is shown in prosilver, with its board and ACP pages; a style is
+made every user's style and shown on board pages. The pages are listed in
+SHOTS below, keyed by an extension's composer name or a style's name from
+style.cfg; add an entry for a new project. Restores the board afterwards.
 
 The first run installs Playwright's Chromium into the user's cache.
 
@@ -28,7 +29,7 @@ ensure_venv()
 import requests  # noqa: E402
 from playwright.sync_api import Browser, Error as PlaywrightError, sync_playwright  # noqa: E402
 
-from _board import Board, ext_name, parse_spec, required_packages  # noqa: E402
+from _board import Board, ext_name, is_style, parse_spec, required_packages, style_cfg  # noqa: E402
 
 BOARD_NAME = "Example board"
 BOARD_DESCRIPTION = "A phpBB board"
@@ -102,7 +103,16 @@ class Shooter:
             context.close()
 
 
-# -- screenshots, one function per extension --------------------------------
+# -- screenshots, one function per project ----------------------------------
+
+def busiest_forum_and_topic(board: Board) -> tuple:
+    """The forum with the most topics and the topic with the most replies, so pages show real content."""
+    forum = board.sql("SELECT forum_id FROM phpbb_forums WHERE forum_type = 1 "
+                      "ORDER BY forum_topics_approved DESC, forum_id LIMIT 1")[0][0]
+    topic = board.sql("SELECT topic_id FROM phpbb_topics "
+                      "ORDER BY topic_posts_approved DESC, topic_id LIMIT 1")[0][0]
+    return forum, topic
+
 
 def shots_documentation(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/documentation: needs --build, a phpbbdocs-hugo build."""
@@ -145,8 +155,20 @@ def shots_documentation(board: Board, shoot: Shooter, args: argparse.Namespace) 
                admin=True, prepare=open_misc_tab, selector="fieldset:has(legend:has-text('Guests'))")
 
 
+def shots_prominodeux(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """ProMinoDeux style: the main board pages, on desktop and phone. Use --seed for real content."""
+    forum, topic = busiest_forum_and_topic(board)
+    shoot.shot("prominodeux-index", "index.php")
+    shoot.shot("prominodeux-viewforum", f"viewforum.php?f={forum}")
+    shoot.shot("prominodeux-viewtopic", f"viewtopic.php?t={topic}")
+    shoot.shot("prominodeux-posting", f"posting.php?mode=reply&t={topic}&sid={{sid}}", admin=True)
+    shoot.shot("prominodeux-index-phone", "index.php", phone=True)
+    shoot.shot("prominodeux-viewtopic-phone", f"viewtopic.php?t={topic}", phone=True)
+
+
 SHOTS = {
     "phpbbmodders/documentation": shots_documentation,
+    "ProMinoDeux": shots_prominodeux,
 }
 
 
@@ -161,19 +183,24 @@ def ensure_chromium(playwright) -> Browser:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Take documentation screenshots of a phpbbmodders extension "
+    ap = argparse.ArgumentParser(description="Take documentation screenshots of a phpbbmodders extension or style "
                                              "on a local test board.",
-                                 epilog="Extensions with screenshots: " + ", ".join(sorted(SHOTS))
+                                 epilog="Projects with screenshots: " + ", ".join(sorted(SHOTS))
                                         + ". Exit status: 0 all saved, 1 a screenshot failed, 2 bad arguments.")
     ap.add_argument("repo", metavar="REPO[@REF]",
-                    help="extension git checkout, optionally with a git ref to install (default ref: HEAD)")
+                    help="extension or style git checkout, optionally with a git ref to install "
+                         "(default ref: HEAD); a style is recognised by its style.cfg")
     ap.add_argument("-o", "--out", required=True, metavar="DIR",
-                    help="directory to save the PNG files in, for example the extension's docs/images")
+                    help="directory to save the PNG files in, for example the project's docs/images")
+    ap.add_argument("-s", "--seed", metavar="SCRIPT",
+                    help="PHP script that fills the board with forums, topics and users after the install, "
+                         "run as 'php SCRIPT BOARD_ROOT'; for example seed-forum's bin/seed-standard-fixtures.php")
     ap.add_argument("--build", metavar="DIR",
                     help="phpbbdocs-hugo build to serve (phpbbmodders/documentation only)")
     ap.add_argument("-w", "--with", dest="needed", action="append", default=[], metavar="PATH[@REF]",
                     help="git checkout of an extension the extension requires (default ref: HEAD); "
-                         "installed and enabled first; repeat for several, in the order they must be enabled")
+                         "installed and enabled first; repeat for several, in the order they must be enabled "
+                         "(extensions only)")
     ap.add_argument("-b", "--board-dir",
                     help="board directory created by setup-board.sh (default: $PHPBB_TEST_BOARD)")
     ap.add_argument("-p", "--port", type=int, default=8083,
@@ -185,24 +212,40 @@ def main() -> int:
         needed = [parse_spec(spec) for spec in args.needed]
     except ValueError as e:
         ap.error(str(e))
+    if args.seed and not Path(args.seed).is_file():
+        ap.error(f"--seed {args.seed} is not a file")
     if args.build and not (Path(args.build) / "index.html").is_file():
         ap.error(f"--build {args.build} is not a built site (no index.html)")
-    name = ext_name(repo, ref)
+    style = is_style(repo, ref)
+    if style and needed:
+        ap.error("--with is for extensions; a style needs no other extensions")
+    name = style_cfg(repo, ref)["name"] if style else ext_name(repo, ref)
     if name not in SHOTS:
         ap.error(f"no screenshots defined for {name}; add them to SHOTS in {Path(__file__).name}")
     out_dir = Path(args.out).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     board = Board(args.board_dir, args.port)
-    for package in required_packages(repo, ref):
-        if package not in {ext_name(r, dep_ref) for r, dep_ref in needed}:
-            print(f"  [note] {repo.name} requires {package}; if it is a phpBB extension, add --with PATH")
-    ext, target, out = board.install_ext(repo, ref, needed)
+    if style:
+        ext, target = board.install_style(repo, ref)
+        out = "Successfully installed"
+    else:
+        for package in required_packages(repo, ref):
+            if package not in {ext_name(r, dep_ref) for r, dep_ref in needed}:
+                print(f"  [note] {repo.name} requires {package}; if it is a phpBB extension, add --with PATH")
+        ext, target, out = board.install_ext(repo, ref, needed)
     print(f"== {ext} ({repo.name} @ {ref}) -> {out_dir}")
     try:
         if "Successfully" not in out:
             print(f"  [FAIL] enable: {out.strip()[-200:]}")
             return 1
+        if args.seed:
+            seeded = subprocess.run(["php", "-d", "opcache.enable_cli=0", str(Path(args.seed).resolve()),
+                                     str(board.root)], capture_output=True, text=True)
+            if seeded.returncode != 0:
+                print(f"  [FAIL] seed: {(seeded.stderr or seeded.stdout).strip()[-300:]}")
+                return 1
+            print(f"  [ok] seeded: {seeded.stdout.strip().splitlines()[-1][:200] if seeded.stdout.strip() else 'done'}")
         board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'sitename'", (BOARD_NAME,))
         board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'site_desc'", (BOARD_DESCRIPTION,))
         board.purge_cache()
@@ -221,7 +264,10 @@ def main() -> int:
         print(f"== {len(shooter.saved)} saved, {len(shooter.failed)} failed")
         return 1 if shooter.failed or errors else 0
     finally:
-        board.remove_ext(target)
+        if style:
+            board.remove_style(target)
+        else:
+            board.remove_ext(target)
 
 
 if __name__ == "__main__":
