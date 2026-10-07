@@ -81,6 +81,28 @@ for script in smoke_test.py feature_checks.py screenshots.py; do
     exits_with 2 "$tools/$script" "$tmp/repo" --with "$tmp" -b "$tmp"
 done
 
+# template_a11y.py: icon-only links and buttons need a tooltip and screen-reader text
+a11y="$tmp/a11y-ext/styles/prosilver/template/event"
+mkdir -p "$a11y" "$tmp/a11y-good/styles/all/template"
+printf '%s\n' \
+  '<a href="{U_A}" title="{L_A}"><i class="icon fa-search fa-fw" aria-hidden="true"></i></a>' \
+  '<a href="{U_B}"><i class="icon fa-eye fa-fw" aria-hidden="true"></i></a>' >"$a11y/bad.html"
+printf '%s\n' \
+  '<a href="{U_A}" title="{L_A}"><i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">{L_A}</span></a>' \
+  '<button title="{{ lang('"'"'GO'"'"') }}" aria-label="{{ lang('"'"'GO'"'"') }}"><i class="icon fa-check"></i></button>' \
+  '<a href="{U_C}"><i class="icon fa-eye fa-fw" aria-hidden="true"></i> {L_VISIBLE}</a>' \
+  '<a href="{U_D}"><i class="icon acp-icon fa-arrow-up" title="{L_UP}"></i><span class="sr-only">{L_UP}</span></a>' \
+  '<a href="{U_E}"><img src="banner.png" alt="{BANNER}"></a>' >"$tmp/a11y-good/styles/all/template/good.html"
+check "template_a11y.py --help exits 0" exits_with 0 "$tools/template_a11y.py" --help
+check "template_a11y.py without arguments exits 2" exits_with 2 "$tools/template_a11y.py"
+check "template_a11y.py with a missing directory exits 2" exits_with 2 "$tools/template_a11y.py" "$tmp/no-such-dir"
+check "template_a11y.py accepts labelled controls" exits_with 0 "$tools/template_a11y.py" "$tmp/a11y-good"
+check "template_a11y.py exits 1 on unlabelled icons" exits_with 1 "$tools/template_a11y.py" "$tmp/a11y-ext"
+check "template_a11y.py reports a missing screen-reader text" \
+  output_has "bad.html:1: icon-only <a> without screen-reader text" "$tools/template_a11y.py" "$tmp/a11y-ext"
+check "template_a11y.py reports a missing tooltip" \
+  output_has "bad.html:2: icon-only <a> without a title (tooltip)" "$tools/template_a11y.py" "$tmp/a11y-ext"
+
 if [ "$failures" -eq 0 ]; then
   echo "All tests passed."
 else
