@@ -15,6 +15,7 @@ The first run installs Playwright's Chromium into the user's cache.
 Exit status: 0 if every screenshot was saved, 1 if any failed, 2 for bad arguments.
 """
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -65,13 +66,14 @@ class Shooter:
         return self._admin_sid
 
     def shot(self, name: str, url: str, admin: bool = False, phone: bool = False,
-             selector: str = "", prepare: Callable = None) -> None:
+             selector: str = "", prepare: Callable = None, full_page: bool = False) -> None:
         """Save one screenshot as OUT_DIR/NAME.png.
 
         url is relative to the board root. With admin=True the admin's session
         is used and {sid} in url is replaced by its session id. selector crops
         the image to that element; prepare(page) runs before the capture, for
         example to open a tab or wait for results loaded by JavaScript.
+        full_page captures the whole page instead of the visible window.
         """
         if admin:
             url = url.replace("{sid}", self.admin_sid())
@@ -94,7 +96,7 @@ class Shooter:
             if selector:
                 page.locator(selector).first.screenshot(path=str(target))
             else:
-                page.screenshot(path=str(target))
+                page.screenshot(path=str(target), full_page=full_page)
             self.saved.append(target)
             print(f"  [ok] {target.name}")
         except (PlaywrightError, RuntimeError) as e:
@@ -165,6 +167,80 @@ def shots_prominodeux(board: Board, shoot: Shooter, args: argparse.Namespace) ->
     shoot.shot("prominodeux-posting", f"posting.php?mode=reply&t={topic}&sid={{sid}}", admin=True)
     shoot.shot("prominodeux-index-phone", "index.php", phone=True)
     shoot.shot("prominodeux-viewtopic-phone", f"viewtopic.php?t={topic}", phone=True)
+
+
+def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/wiki: overview, articles, editing, approval and links between articles."""
+    def add_article(title: str, text: str, description: str = "", views: int = 0, sticky: int = 0,
+                    approved: int = 1, days_ago: float = 0, edit_reason: str = "") -> int:
+        """Store one article version through phpBB's own text parser; return its id."""
+        out = board.php(
+            "$t = " + json.dumps(text) + "; $uid = $bit = ''; $flags = 0;"
+            "generate_text_for_storage($t, $uid, $bit, $flags, true, true, true);"
+            "$when = time() - " + str(int(days_ago * 86400)) + ";"
+            "$db->sql_query('INSERT INTO ' . $table_prefix . 'wiki_article ' . "
+            "$db->sql_build_array('INSERT', ['article_title' => " + json.dumps(title) + ", 'article_url' => "
+            + json.dumps(title) + ", 'article_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit, "
+            "'article_approved' => " + str(approved) + ", 'article_user_id' => 2, 'article_last_edit' => $when, "
+            "'article_time_created' => $when, 'article_sources' => '', 'article_description' => "
+            + json.dumps(description) + ", 'article_views' => " + str(views) + ", 'article_sticky' => "
+            + str(sticky) + ", 'article_edit_reason' => " + json.dumps(edit_reason) + "]));"
+            "echo $db->sql_nextid();",
+            check=True)
+        return int(out.strip().splitlines()[-1])
+
+    add_article("Getting Started",
+                "Welcome to the community wiki. Anyone can read it, and members can help keep it up to date."
+                "\n\n[b]Where to begin[/b]\n[list]\n[*]New to the board? Read the [[Frequently Asked Questions]]."
+                "\n[*]Installing the software yourself? Start with [[Installation]].\n[*]Writing posts? The "
+                "[[Formatting Guide]] covers bold text, lists, links and code.\n[/list]\n\nEvery edit is kept, "
+                "so nothing is lost: open [i]Versions[/i] on any article to see who changed what.",
+                "A quick tour of the board and the wiki.", views=148, sticky=1, days_ago=12)
+    add_article("Installation",
+                "Before you start, read the [[Requirements]]. Then follow [[Upgrading]] if you already run an "
+                "older version, or see the [[Troubleshooting|troubleshooting tips]] if something goes wrong."
+                "\n\nOnce installed, the [[Configuration]] page explains every setting.",
+                "Installing the software step by step.", views=96, days_ago=9)
+    add_article("Requirements", "You need phpBB 3.3 and PHP 7.4 or later. See [[Installation]] for the next steps.",
+                "What your server needs.", views=64, days_ago=8)
+    add_article("Configuration", "Every setting is described here. Return to [[Installation]].",
+                "Every setting explained.", views=51, days_ago=6)
+    add_article("Frequently Asked Questions",
+                "[b]How do I change my avatar?[/b]\nOpen the User Control Panel and choose Profile.",
+                "Common questions from new members.", views=23, days_ago=4)
+    guide = ("Use [b]bold[/b] for emphasis, [i]italic[/i] for titles and [code]code[/code] for code."
+             "\n\nSee the [[Getting Started]] page for more help.")
+    active = add_article("Formatting Guide", guide, "How to format posts with BBCode.", views=37, days_ago=3)
+    pending = add_article("Formatting Guide",
+                          guide + "\n\nTo quote another post, click [i]Quote[/i] below it.",
+                          "How to format posts with BBCode.", views=37, approved=0, days_ago=0.1,
+                          edit_reason="Added a note about quoting")
+    board.purge_cache()
+
+    shoot.shot("wiki-overview", "app.php/wiki/?sid={sid}", admin=True, full_page=True)
+    shoot.shot("wiki-article-view", "app.php/wiki/Getting%20Started?sid={sid}", admin=True)
+    shoot.shot("wiki-edit", "app.php/wiki/Getting%20Started?action=edit&sid={sid}", admin=True, full_page=True)
+    # The first list on the overview is the pending one, shown to moderators.
+    shoot.shot("wiki-pending-articles", "app.php/wiki/?sid={sid}", admin=True, selector=".forumbg")
+    shoot.shot("wiki-compare", f"app.php/wiki/Formatting%20Guide?action=compare&from={pending}&to={active}"
+               "&sid={sid}", admin=True)
+
+    def open_moderator_controls(p) -> None:
+        p.click("#quickmod .dropdown-trigger")
+        p.wait_for_selector("#quickmod .dropdown:visible")
+    shoot.shot("wiki-moderator-controls", "app.php/wiki/Formatting%20Guide?action=versions&sid={sid}",
+               admin=True, prepare=open_moderator_controls)
+
+    # Requirements is linked from Installation and links back, so its page
+    # shows both a link and the What links here list.
+    shoot.shot("wiki-article-links", "app.php/wiki/Installation?sid={sid}", admin=True,
+               selector=".panel.bg1")
+    shoot.shot("wiki-what-links-here", "app.php/wiki/Requirements?sid={sid}", admin=True)
+
+    def highlight_button(p) -> None:
+        p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
+    shoot.shot("wiki-link-button", "app.php/wiki/Requirements?action=edit&sid={sid}", admin=True,
+               selector="#format-buttons", prepare=highlight_button)
 
 
 # Made-up values for the StopForumSpam screenshots. Nothing is ever sent to
@@ -254,6 +330,7 @@ SHOTS = {
     "phpbbmodders/documentation": shots_documentation,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
+    "phpbbmodders/wiki": shots_wiki,
     "ProMinoDeux": shots_prominodeux,
 }
 

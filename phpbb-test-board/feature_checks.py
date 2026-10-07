@@ -129,6 +129,49 @@ def check_groupwarn(b: Board) -> None:
        "moderator can warn once all the user's groups are ticked")
 
 
+def check_wiki(b: Board) -> None:
+    # Articles and a post stored through phpBB's own text parser, so the
+    # extension's [[ ]] markup is parsed exactly as on a real board.
+    def store(text: str) -> str:
+        return ("$t = " + json.dumps(text) + "; $uid = $bit = ''; $flags = 0;"
+                "generate_text_for_storage($t, $uid, $bit, $flags, true, true, true);")
+
+    articles = (
+        ("First article", "Read [[Second article]] and [[Missing page|this one]]."),
+        ("Second article", "The second article."),
+    )
+    for title, text in articles:
+        b.php(store(text) + "$db->sql_query('INSERT INTO ' . $table_prefix . 'wiki_article ' . "
+              "$db->sql_build_array('INSERT', ['article_title' => " + json.dumps(title) + ", 'article_url' => "
+              + json.dumps(title) + ", 'article_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit, "
+              "'article_approved' => 1, 'article_user_id' => 2, 'article_last_edit' => time(), "
+              "'article_time_created' => time(), 'article_sources' => '', 'article_description' => '']));",
+              check=True)
+    b.php(store("See [[Second article]].\n[code][[Not a link]][/code]")
+          + "$db->sql_query('UPDATE ' . POSTS_TABLE . ' SET ' . $db->sql_build_array('UPDATE', "
+            "['post_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit]) . ' WHERE post_id = 1');",
+          check=True)
+    b.purge_cache()
+
+    admin = requests.Session()
+    sid = b.login(admin)
+    first = admin.get(f"{b.base}/app.php/wiki/First%20article").text
+    ok(re.search(r'<a class="wikilink" href="[^"]*/wiki/Second%20article[^"]*"', first),
+       "[[Second article]] links to the existing article")
+    ok(re.search(r'<a class="wikilink wikilink-new" href="[^"]*/wiki/Missing%20page[^"]*"[^>]*>this one</a>', first),
+       "[[Missing page|this one]] shows its own text and is marked as a new article")
+    second = admin.get(f"{b.base}/app.php/wiki/Second%20article").text
+    ok("What links here" in second and re.search(r'href="[^"]*/wiki/First%20article[^"]*">First article</a>', second),
+       "Second article lists First article under What links here")
+    ok("What links here" not in first, "an article nothing links to has no What links here list")
+    topic = admin.get(f"{b.base}/viewtopic.php?t=1").text
+    ok(re.search(r'<a class="wikilink" href="[^"]*/wiki/Second%20article', topic),
+       "[[ ]] in a forum post links to the wiki article")
+    ok("[[Not a link]]" in topic, "[[ ]] inside a code block stays plain text")
+    posting = admin.get(f"{b.base}/posting.php?mode=reply&t=1&sid={sid}").text
+    ok("bbcode-wikilink" in posting, "the posting editor has the wiki link button")
+
+
 def check_documentation(b: Board) -> None:
     # The default build location moved over time (ext/.../docs-build, then
     # store/phpbbmodders_documentation), so write the probe build wherever
@@ -321,6 +364,7 @@ def check_sfscompanion(b: Board) -> None:
 
 CHECKS = {
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
+    "phpbbmodders/wiki": check_wiki,
     "phpbbmodders/banlist": check_banlist,
     "phpbbmodders/bannerrotator": check_bannerrotator,
     "phpbbmodders/groupwarn": check_groupwarn,
