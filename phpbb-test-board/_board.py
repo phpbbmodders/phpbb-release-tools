@@ -66,12 +66,19 @@ class Board:
         finally:
             con.close()
 
-    def php(self, code: str) -> str:
-        """Run PHP inside the board (common.php and functions_user.php loaded)."""
+    def php(self, code: str, check: bool = False) -> str:
+        """Run PHP inside the board (common.php and functions_user.php loaded); return its output.
+
+        With check=True a failing script (non-zero exit, such as a fatal
+        error) raises RuntimeError instead of being ignored.
+        """
         boot = ("define('IN_PHPBB',1);$phpbb_root_path='./';$phpEx='php';require 'common.php';"
                 "require 'includes/functions_user.php';$user->session_begin();$auth->acl($user->data);$user->setup();")
-        return subprocess.run(["php", "-d", "opcache.enable_cli=0", "-r", boot + code],
-                              cwd=self.root, capture_output=True, text=True).stdout
+        r = subprocess.run(["php", "-d", "opcache.enable_cli=0", "-r", boot + code],
+                           cwd=self.root, capture_output=True, text=True)
+        if check and r.returncode != 0:
+            raise RuntimeError(f"PHP failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        return r.stdout
 
     def reset(self) -> None:
         """Restore the clean database and cache."""

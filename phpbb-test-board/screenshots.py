@@ -166,8 +166,74 @@ def shots_prominodeux(board: Board, shoot: Shooter, args: argparse.Namespace) ->
     shoot.shot("prominodeux-viewtopic-phone", f"viewtopic.php?t={topic}", phone=True)
 
 
+# Made-up values for the StopForumSpam screenshots. Nothing is ever sent to
+# stopforumspam.com: the pages shown only read the board's own data and logs.
+SFS_EXAMPLE_API_KEY = "0123456789abcdef"
+SFS_EXAMPLE_POSTER_IP = "93.184.216.34"  # a public address, so posts can be reported
+
+
+def enable_stopforumspam(board: Board) -> None:
+    """Turn StopForumSpam on with an example API key, and give posts a public poster IP."""
+    for name, value in (("allow_sfs", "1"), ("sfs_api_key", SFS_EXAMPLE_API_KEY)):
+        board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+    board.sql("UPDATE phpbb_posts SET poster_ip = ?", (SFS_EXAMPLE_POSTER_IP,))
+    board.purge_cache()
+    # The admins-and-moderators list the ACP asks for when an API key is set;
+    # built locally from the board's own groups, so staff can't be reported.
+    board.php("$phpbb_container->get('phpbbmodders.stopforumspam.core.sfsgroups')->build_adminsmods_cache();", check=True)
+
+
+def shots_stopforumspam(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/stopforumspam: its ACP settings and the report button on posts. Use --seed."""
+    enable_stopforumspam(board)
+    shoot.shot("stopforumspam-acp-settings",
+               "adm/index.php?i=-phpbbmodders-stopforumspam-acp-stopforumspam_module&mode=settings&sid={sid}",
+               admin=True)
+    _, topic = busiest_forum_and_topic(board)
+    def highlight_button(p) -> None:
+        p.add_style_tag(content="li[id^='sfs'] .button { outline: 3px solid #d31141; outline-offset: 2px; }")
+    shoot.shot("stopforumspam-report-button", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True,
+               selector=".post:has(li[id^='sfs'])", prepare=highlight_button)
+
+
+def shots_sfscompanion(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/sfscompanion: its ACP logs and settings, and the profile link.
+
+    Needs --with phpbbmodders/stopforumspam; use --seed. The lookup and scan
+    pages are left out because opening them queries stopforumspam.com.
+    """
+    enable_stopforumspam(board)
+    # Example log entries in the shape phpbbmodders/stopforumspam writes them:
+    # logged by the guest (user 1) who was registering or posting.
+    entries = (
+        ("user", "203.0.113.9", "LOG_SFS_MESSAGE", "['reportee_id' => 1, 'casino_deals', '203.0.113.9', 'deals@example.com']"),
+        ("user", "203.0.113.24", "LOG_SFS_MESSAGE", "['reportee_id' => 1, 'cheap_pills_now', '203.0.113.24', 'pills@example.net']"),
+        ("user", "198.51.100.41", "LOG_SFS_MESSAGE", "['reportee_id' => 1, 'seo_expert_99', '198.51.100.41', 'seo@example.org']"),
+        ("user", "192.0.2.77", "LOG_SFS_MESSAGE", "['reportee_id' => 1, 'free_followers', '192.0.2.77', 'followers@example.com']"),
+        ("admin", "198.51.100.7", "LOG_SFS_DOWN", "[]"),
+        ("admin", "198.51.100.8", "LOG_SFS_DOWN", "[]"),
+    )
+    board.php("".join(f"$phpbb_log->add('{mode}', 1, '{ip}', '{op}', false, {data});"
+                      for mode, ip, op, data in entries), check=True)
+    board.sql("UPDATE phpbb_config SET config_value = '30' WHERE config_name = 'sfsc_expire_days'")
+    board.purge_cache()
+    page = "adm/index.php?i=-phpbbmodders-sfscompanion-acp-main_module&sid={sid}&mode="
+    shoot.shot("sfscompanion-acp-blocks", page + "blocks", admin=True)
+    shoot.shot("sfscompanion-acp-errors", page + "errors", admin=True)
+    shoot.shot("sfscompanion-acp-settings", page + "settings", admin=True)
+    member = board.sql("SELECT user_id FROM phpbb_users WHERE user_type = 0 AND user_id <> 2 "
+                       "ORDER BY user_posts DESC, user_id LIMIT 1")
+    member_id = member[0][0] if member else 2
+    def highlight_link(p) -> None:
+        p.add_style_tag(content="a[href*='sfs-companion/finder'] { background: #ffd54f; border-radius: 3px; padding: 2px 3px; }")
+    shoot.shot("sfscompanion-profile-link", f"memberlist.php?mode=viewprofile&u={member_id}&sid={{sid}}",
+               admin=True, selector=".panel:has(a[href*='sfs-companion/finder'])", prepare=highlight_link)
+
+
 SHOTS = {
     "phpbbmodders/documentation": shots_documentation,
+    "phpbbmodders/sfscompanion": shots_sfscompanion,
+    "phpbbmodders/stopforumspam": shots_stopforumspam,
     "ProMinoDeux": shots_prominodeux,
 }
 
