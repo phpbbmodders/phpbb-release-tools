@@ -26,6 +26,12 @@ printf '%s\n' '{"name":"acme/ext","version":"1.2.3-dev"}' >"$FIXTURE_ROOT/source
 git -C "$FIXTURE_ROOT/source" -c user.name='William Jacoby' -c user.email=bonelifer@gmail.com commit -qam dev
 DEV_COMMIT=$(git -C "$FIXTURE_ROOT/source" rev-parse HEAD)
 export DEV_COMMIT
+# A rolling build on the way to an alpha, also on its own branch.
+git -C "$FIXTURE_ROOT/source" checkout -qb alpha-dev main
+printf '%s\n' '{"name":"acme/ext","version":"1.2.3-a2-dev"}' >"$FIXTURE_ROOT/source/composer.json"
+git -C "$FIXTURE_ROOT/source" -c user.name='William Jacoby' -c user.email=bonelifer@gmail.com commit -qam alpha-dev
+ALPHA_DEV_COMMIT=$(git -C "$FIXTURE_ROOT/source" rev-parse HEAD)
+export ALPHA_DEV_COMMIT
 git -C "$FIXTURE_ROOT/source" checkout -q main
 # A dirty local version must never change the remotely committed package version.
 printf '%s\n' '{"name":"acme/ext","version":"9.9.9"}' >"$FIXTURE_ROOT/source/composer.json"
@@ -72,7 +78,9 @@ case "$endpoint" in
   repos/acme/ext/commits/main|repos/acme/ext/commits/master)
     [[ "$endpoint" == */main || "${SCENARIO:-}" == master_branch ]] || exit 1
     [[ "${SCENARIO:-}" != main_failure ]] || exit 1
-    if [[ "${SCENARIO:-}" == dev_* ]]; then sha="$DEV_COMMIT"; else sha="$FIXTURE_COMMIT"; fi
+    if [[ "${SCENARIO:-}" == dev_* ]]; then sha="$DEV_COMMIT"
+    elif [[ "${SCENARIO:-}" == alpha_dev ]]; then sha="$ALPHA_DEV_COMMIT"
+    else sha="$FIXTURE_COMMIT"; fi
     jq -n --arg sha "$sha" '{sha:$sha}' ;;
   'repos/acme/ext/releases?per_page=100')
     echo '[]'
@@ -88,6 +96,8 @@ case "$endpoint" in
     if [[ "${SCENARIO:-}" == dev_existing ]]; then
       jq -n --arg sha "$FIXTURE_COMMIT" '[{ref:"refs/tags/1.2.3-dev",object:{sha:$sha}}]'
     else echo '[]'; fi ;;
+  repos/acme/ext/git/matching-refs/tags/1.2.3-a2-dev)
+    echo '[]' ;;
   repos/acme/ext/git/refs/tags/1.2.3-dev)
     jq -n --arg sha "$DEV_COMMIT" '{ref:"refs/tags/1.2.3-dev",object:{sha:$sha}}' ;;
   repos/acme/ext/releases/456)
@@ -219,6 +229,12 @@ if grep -qE '^POST repos/acme/ext/(releases|git/refs)$' "$FIXTURE_ROOT/methods.l
 grep -q 'Updated rolling release: https://github.com/acme/ext/releases/tag/1.2.3-dev' "$FIXTURE_ROOT/stdout"
 if grep -q 'Published release' "$FIXTURE_ROOT/stdout"; then exit 1; fi
 echo 'ok - dev release moves the tag, regenerates notes, and replaces the ZIP in the same release'
+
+export SCENARIO=alpha_dev
+run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
+grep -q 'Release: 1.2.3-a2-dev (prerelease: true)' "$FIXTURE_ROOT/stdout"
+[[ "$(unzip -p "$FIXTURE_ROOT/output/acme-ext-1.2.3-a2-dev.zip" acme/ext/composer.json | jq -r .version)" == 1.2.3-a2-dev ]]
+echo 'ok - an alpha with -dev (1.2.3-a2-dev) is accepted as a rolling prerelease'
 
 export SCENARIO=dev_new
 run --release --repo acme/ext --output "$FIXTURE_ROOT/output"
