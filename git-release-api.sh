@@ -29,7 +29,8 @@ Stable, alpha, beta, and RC releases are immutable: an existing release or tag
 is rejected, and an upload/publication failure leaves the draft release for
 inspection.
 
-A version ending in -dev is a rolling prerelease. The first --release creates
+A version ending in -dev, such as 1.1.0-dev or 1.1.0-a2-dev, is a rolling
+prerelease. The first --release creates
 it; each later --release moves its tag to the default branch, regenerates its notes,
 and replaces its ZIP in the same release, keeping its URL. --dry-run never
 changes the tag, release, or asset.
@@ -112,7 +113,8 @@ git -C "$scratch/source" show "$commit:composer.json" >"$scratch/composer.json"
 package=$(jq -er '.name | select(type == "string")' "$scratch/composer.json")
 version=$(jq -er '.version | select(type == "string")' "$scratch/composer.json")
 [[ "$package" =~ ^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]] || fail 'composer.json needs a safe vendor/name package name.'
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(dev|a(lpha)?[0-9]*|b(eta)?[0-9]*|[Rr][Cc][0-9]*|p(atch)?[0-9]*))?$ ]] || fail 'composer.json has an unsupported version.'
+# An alpha, beta or RC may end in -dev (1.1.0-a2-dev): a rolling build on the way to it.
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(dev|(a(lpha)?|b(eta)?|[Rr][Cc])[0-9]*(-dev)?|p(atch)?[0-9]*))?$ ]] || fail 'composer.json has an unsupported version.'
 vendor=${package%%/*}
 releasename=${package#*/}
 filename="$vendor-$releasename-$version.zip"
