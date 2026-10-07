@@ -15,6 +15,7 @@ The first run installs Playwright's Chromium into the user's cache.
 Exit status: 0 if every screenshot was saved, 1 if any failed, 2 for bad arguments.
 """
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -167,6 +168,38 @@ def shots_prominodeux(board: Board, shoot: Shooter, args: argparse.Namespace) ->
     shoot.shot("prominodeux-viewtopic-phone", f"viewtopic.php?t={topic}", phone=True)
 
 
+def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/wiki: links between articles, written as [[Article name]]."""
+    articles = (
+        ("Installation", "Before you start, read the [[Requirements]]. Then follow [[Upgrading]] if you "
+                         "already run an older version, or see the [[Troubleshooting|troubleshooting tips]] "
+                         "if something goes wrong.\n\nOnce installed, the [[Configuration]] page explains "
+                         "every setting."),
+        ("Requirements", "You need phpBB 3.3 and PHP 7.4 or later. See [[Installation]] for the next steps."),
+        ("Configuration", "Every setting is described here. Return to [[Installation]]."),
+    )
+    for title, text in articles:
+        board.php("$t = " + json.dumps(text) + "; $uid = $bit = ''; $flags = 0;"
+                  "generate_text_for_storage($t, $uid, $bit, $flags, true, true, true);"
+                  "$db->sql_query('INSERT INTO ' . $table_prefix . 'wiki_article ' . "
+                  "$db->sql_build_array('INSERT', ['article_title' => " + json.dumps(title) + ", 'article_url' => "
+                  + json.dumps(title) + ", 'article_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit, "
+                  "'article_approved' => 1, 'article_user_id' => 2, 'article_last_edit' => time(), "
+                  "'article_time_created' => time(), 'article_sources' => '', 'article_description' => '']));",
+                  check=True)
+    board.purge_cache()
+    # Requirements is linked from Installation and links back, so its page
+    # shows both a link and the What links here list.
+    shoot.shot("wiki-article-links", "app.php/wiki/Installation?sid={sid}", admin=True,
+               selector=".panel.bg1")
+    shoot.shot("wiki-what-links-here", "app.php/wiki/Requirements?sid={sid}", admin=True)
+
+    def highlight_button(p) -> None:
+        p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
+    shoot.shot("wiki-link-button", "app.php/wiki/Requirements?action=edit&sid={sid}", admin=True,
+               selector="#format-buttons", prepare=highlight_button)
+
+
 # Made-up values for the StopForumSpam screenshots. Nothing is ever sent to
 # stopforumspam.com: the pages shown only read the board's own data and logs.
 SFS_EXAMPLE_API_KEY = "0123456789abcdef"
@@ -254,6 +287,7 @@ SHOTS = {
     "phpbbmodders/documentation": shots_documentation,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
+    "phpbbmodders/wiki": shots_wiki,
     "ProMinoDeux": shots_prominodeux,
 }
 
