@@ -101,7 +101,7 @@ Scans an extension's or style's templates (`styles/`, `adm/style/`, or a style's
 <a href="{U_CHECK}" title="{L_CHECK}"><i class="icon fa-search fa-fw" aria-hidden="true"></i><span class="sr-only">{L_CHECK}</span></a>
 ```
 
-A `title` on the icon itself, phpBB's ACP pattern, counts as the tooltip, and a link around an image with alt text passes. Problems are printed as `FILE:LINE: message`, and the exit status is 1 if there are any. It needs no board and only Python's standard library.
+In ACP templates (`adm/style/`) use `aria-label` instead of the span: the ACP style has no `sr-only` class, so the text would show. A `title` on the icon itself, phpBB's ACP pattern, counts as the tooltip, and a link around an image with alt text passes. Problems are printed as `FILE:LINE: message`, and the exit status is 1 if there are any. It needs no board and only Python's standard library.
 
 ## Extensions that need another extension
 

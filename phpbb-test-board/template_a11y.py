@@ -9,7 +9,9 @@ is an icon or image. Each such control needs:
   - a title attribute, for the tooltip sighted mouse users see, and
   - screen-reader text: a <span class="sr-only"> inside it or an aria-label.
 
-A title on the icon itself, phpBB's ACP pattern, also counts as the tooltip.
+In ACP templates use aria-label: the ACP style has no sr-only class, so a
+span would be visible there. A title on the icon itself, phpBB's ACP
+pattern, also counts as the tooltip.
 A link around an image with alt text is described by that text and passes.
 
 Both should come from a language string, not hard-coded text. Template
@@ -50,8 +52,9 @@ class Control:
 class TemplateChecker(HTMLParser):
     """Collect icon-only controls that lack a tooltip or screen-reader text."""
 
-    def __init__(self) -> None:
+    def __init__(self, acp: bool = False) -> None:
         super().__init__(convert_charrefs=True)
+        self.acp = acp
         self.problems: list = []
         self.controls: list = []
         self.sr_only_depth: list = []  # per open element: inside an sr-only element?
@@ -109,7 +112,9 @@ class TemplateChecker(HTMLParser):
         if not control.attrs.get("title", "").strip() and not control.child_title:
             missing.append("a title (tooltip)")
         if not named:
-            missing.append('screen-reader text (<span class="sr-only"> or aria-label)')
+            # The ACP style has no sr-only class, so a span there would show.
+            missing.append("screen-reader text (aria-label; the ACP has no sr-only class)" if self.acp
+                           else 'screen-reader text (<span class="sr-only"> or aria-label)')
         if missing:
             self.problems.append((control.line, f"icon-only <{control.tag}> without " + " or ".join(missing)))
 
@@ -126,7 +131,7 @@ def template_files(root: Path) -> list:
 
 def check_file(path: Path) -> list:
     """Problems in one template, as (line, message) pairs."""
-    checker = TemplateChecker()
+    checker = TemplateChecker(acp="adm/style" in path.as_posix())
     checker.feed(path.read_text(encoding="utf-8", errors="replace"))
     checker.close()
     return checker.problems
