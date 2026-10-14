@@ -171,13 +171,19 @@ def shots_prominodeux(board: Board, shoot: Shooter, args: argparse.Namespace) ->
 
 
 def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
-    """phpbbmodders/wiki: overview, articles, editing, approval and links between articles."""
+    """phpbbmodders/wiki: overview, articles, editing, approval, links between articles, moving, and the
+    lists of templates and categories."""
     def add_article(title: str, text: str, description: str = "", views: int = 0, sticky: int = 0,
                     approved: int = 1, days_ago: float = 0, edit_reason: str = "") -> int:
-        """Store one article version through phpBB's own text parser; return its id."""
+        """Store one article version as the edit form does: the text escaped as phpBB's request
+        escapes what is typed (so an entity such as &#32; arrives as written), then parsed with
+        the wiki's markup on, so categories and templates are read; return its id."""
         out = board.php(
-            "$t = " + json.dumps(text) + "; $uid = $bit = ''; $flags = 0;"
+            "$t = " + json.dumps(text) + "; $uid = $bit = ''; $flags = 0; $typed = $t;"
+            "(new \\phpbb\\request\\type_cast_helper())->set_var($t, $typed, 'string', true);"
+            "\\phpbbmodders\\wiki\\wiki\\markup::set_active(true);"
             "generate_text_for_storage($t, $uid, $bit, $flags, true, true, true);"
+            "\\phpbbmodders\\wiki\\wiki\\markup::set_active(false);"
             "$when = time() - " + str(int(days_ago * 86400)) + ";"
             "$db->sql_query('INSERT INTO ' . $table_prefix . 'wiki_article ' . "
             "$db->sql_build_array('INSERT', ['article_title' => " + json.dumps(title) + ", 'article_url' => "
@@ -202,15 +208,30 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
                 "older version, or see the [[Troubleshooting|troubleshooting tips]] if something goes wrong."
                 "\n\nOnce installed, the [[Configuration]] page explains every setting.",
                 "Installing the software step by step.", views=96, days_ago=9)
-    add_article("Requirements", "You need phpBB 3.3 and PHP 7.4 or later. See [[Installation]] for the next steps.",
-                "What your server needs.", views=64, days_ago=8)
-    add_article("Configuration", "Every setting is described here. Return to [[Installation]].",
+    add_article("Requirements", "You need phpBB 3.3 and PHP 7.4 or later. See [[Installation]] for the next steps."
+                "\n\n[[Category:Setup]]", "What your server needs.", views=64, days_ago=8)
+    # A template, used in an article, for the list of templates; and a category with a page
+    add_article("Template:Out of date",
+                "<noinclude>Shows a notice that an article needs updating. Write it at the top of the "
+                "article:\n\n{{Out of date|reason=the 2.0 release changed this}}</noinclude>"
+                "<table><tr><td>[b]This article is out of date.[/b]{{#if:{{{reason|}}}|&#32;Reason: {{{reason}}}.}}"
+                "</td></tr></table>",
+                "A notice for articles that need updating", days_ago=7)
+    add_article("Template:Start Guide",
+                "<noinclude>A starting point for a new guide.</noinclude>== Before you start ==\n\n"
+                "== Steps ==\n\n== See also ==",
+                "A starting point for a guide", days_ago=7)
+    add_article("Configuration", "{{Out of date|reason=the 2.0 release added settings}}\n\nEvery setting is "
+                "described here. Return to [[Installation]].\n\n[[Category:Setup]]",
                 "Every setting explained.", views=51, days_ago=6)
+    add_article("Category:Setup", "Installing the software and getting it ready.",
+                "Installing and configuring the software", days_ago=6)
     add_article("Frequently Asked Questions",
-                "[b]How do I change my avatar?[/b]\nOpen the User Control Panel and choose Profile.",
+                "[b]How do I change my avatar?[/b]\nOpen the User Control Panel and choose Profile."
+                "\n\n[[Category:Guides]]",
                 "Common questions from new members.", views=23, days_ago=4)
     guide = ("Use [b]bold[/b] for emphasis, [i]italic[/i] for titles and [code]code[/code] for code."
-             "\n\nSee the [[Getting Started]] page for more help.")
+             "\n\nSee the [[Getting Started]] page for more help.\n\n[[Category:Guides]]")
     active = add_article("Formatting Guide", guide, "How to format posts with BBCode.", views=37, days_ago=3)
     pending = add_article("Formatting Guide",
                           guide + "\n\nTo quote another post, click [i]Quote[/i] below it.",
@@ -223,7 +244,8 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     shoot.shot("wiki-edit", "app.php/wiki/Getting%20Started?action=edit&sid={sid}", admin=True, full_page=True)
     # The first list on the overview is the pending one, shown to moderators.
     shoot.shot("wiki-pending-articles", "app.php/wiki/?sid={sid}", admin=True, selector=".forumbg")
-    shoot.shot("wiki-compare", f"app.php/wiki/Formatting%20Guide?action=compare&from={pending}&to={active}"
+    # From the live version to the pending edit, so the readable view shows what the edit adds
+    shoot.shot("wiki-compare", f"app.php/wiki/Formatting%20Guide?action=compare&from={active}&to={pending}"
                "&sid={sid}", admin=True)
 
     def open_moderator_controls(p) -> None:
@@ -237,6 +259,15 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     shoot.shot("wiki-article-links", "app.php/wiki/Installation?sid={sid}", admin=True,
                selector=".panel.bg1")
     shoot.shot("wiki-what-links-here", "app.php/wiki/Requirements?sid={sid}", admin=True)
+
+    # The lists of templates and categories, with their help box and first row open
+    def open_help_and_first_row(p) -> None:
+        p.evaluate("document.querySelectorAll('details').forEach((d, i) => { d.open = i < 2; })")
+    shoot.shot("wiki-templates", "app.php/wiki/templates?sid={sid}", admin=True, full_page=True,
+               prepare=open_help_and_first_row)
+    shoot.shot("wiki-categories", "app.php/wiki/categories?sid={sid}", admin=True, full_page=True,
+               prepare=open_help_and_first_row)
+    shoot.shot("wiki-move", "app.php/wiki/Requirements?action=move&sid={sid}", admin=True)
 
     def highlight_button(p) -> None:
         p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
