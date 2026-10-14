@@ -1,8 +1,9 @@
 #!/usr/bin/bash
 # Option-handling tests for the phpbb-test-board tools: help output, exit
 # status for bad arguments, and the error for a missing board. Does not build
-# a board or contact phpBB; the Python scripts' first run creates their
-# virtualenv (phpbb-test-board/.venv), which needs network access once.
+# a board or contact phpBB, and run-unit-tests.sh is only given bad arguments;
+# the Python scripts' first run creates their virtualenv
+# (phpbb-test-board/.venv), which needs network access once.
 # Usage: tests/test-phpbb-test-board.sh
 # Exit status: 0 if every test passes, 1 otherwise.
 
@@ -121,6 +122,25 @@ check "template_a11y.py reports a missing screen-reader text" \
   output_has "bad.html:1: icon-only <a> without screen-reader text" "$tools/template_a11y.py" "$tmp/a11y-ext"
 check "template_a11y.py reports a missing tooltip" \
   output_has "bad.html:2: icon-only <a> without a title (tooltip)" "$tools/template_a11y.py" "$tmp/a11y-ext"
+
+# run-unit-tests.sh: option handling only; no phpBB checkout is cloned or run
+mkdir -p "$tmp/ext-no-phpunit" "$tmp/ext-bad-name"
+echo '{"name": "vendor/ext"}' >"$tmp/ext-no-phpunit/composer.json"
+echo '{"name": "Not A Name"}' >"$tmp/ext-bad-name/composer.json"
+touch "$tmp/ext-bad-name/phpunit.xml.dist"
+check "run-unit-tests.sh without arguments shows help and exits 0" \
+  exits_with 0 "$tools/run-unit-tests.sh"
+check "run-unit-tests.sh --help shows usage" output_has "Usage: run-unit-tests.sh" "$tools/run-unit-tests.sh" --help
+check "run-unit-tests.sh with an unknown option exits 2" exits_with 2 "$tools/run-unit-tests.sh" --nope "$tmp"
+check "run-unit-tests.sh with an unknown branch exits 2" \
+  exits_with 2 "$tools/run-unit-tests.sh" -b 3.2.x "$tmp/ext-no-phpunit"
+check "run-unit-tests.sh with a missing directory exits 2" exits_with 2 "$tools/run-unit-tests.sh" "$tmp/no-such-dir"
+check "run-unit-tests.sh without phpunit.xml.dist exits 2" \
+  exits_with 2 "$tools/run-unit-tests.sh" "$tmp/ext-no-phpunit"
+check "run-unit-tests.sh with two directories exits 2" \
+  exits_with 2 "$tools/run-unit-tests.sh" "$tmp/ext-no-phpunit" "$tmp/ext-bad-name"
+check "run-unit-tests.sh rejects a composer name that is not vendor/name" \
+  output_has "composer.json has no valid vendor/name" "$tools/run-unit-tests.sh" -e "$tmp/no-env" "$tmp/ext-bad-name"
 
 if [ "$failures" -eq 0 ]; then
   echo "All tests passed."

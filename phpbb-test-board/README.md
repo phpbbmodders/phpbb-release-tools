@@ -44,6 +44,19 @@ Installs the current stable phpBB 3.3 release, or `--version`, with no extension
 
 `--force` replaces an existing board in `DIR`.
 
+### `run-unit-tests.sh`: the extension's PHPUnit tests
+
+```bash
+phpbb-test-board/run-unit-tests.sh path/to/extension [-b 3.3.x|master] [-f PATTERN] [-- PHPUNIT_ARGS...]
+```
+
+Runs the extension's `phpunit.xml.dist` the way [phpbb-extensions/test-framework](https://github.com/phpbb-extensions/test-framework) does in CI: inside a phpBB checkout, with phpBB's own PHPUnit and `tests/bootstrap.php`. It needs no board.
+- **The checkout** is set up on first use in `~/.cache/phpbb-release-tools/phpbb-BRANCH` (or `--env DIR`, or `PHPBB_UNIT_ENV`): a shallow clone of phpBB, its Composer dependencies, and on PHP 8 with phpBB 3.3.x the switch to PHPUnit 9 that phpBB's own CI makes, since 3.3.x ships PHPUnit 7.5. `--update` pulls it and reinstalls.
+- **The extension** is copied in afresh on every run (`rsync --delete`, without `.git`), into `phpBB/ext/` under its `composer.json` name, so a test never runs against an old copy.
+- `-f PATTERN` runs only the matching tests; anything after `--` goes to PHPUnit, for example `-- --testdox` or, on `master`, `-- --display-skipped`.
+
+Exit status: PHPUnit's, 1 for a setup failure, 2 for bad arguments. Needs `git`, `php`, `composer`, `rsync` and `jq`.
+
 ### `smoke_test.py`: does the extension break anything?
 
 ```bash
