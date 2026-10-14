@@ -82,6 +82,8 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 - `--seed SCRIPT` runs a PHP script that fills the board with forums, topics and users first, as `php SCRIPT BOARD_ROOT`. Use it for styles and for any pages that need real content; a fresh board has one forum and one post. [seed-forum](https://github.com/phpbbmodders/seed-forum)'s `bin/seed-standard-fixtures.php` works well.
 - `--build DIR` is for phpbbmodders/documentation only: the phpbbdocs-hugo build to serve.
 
+`phpbbmodders/knowledgebase` makes its own categories, articles (live, waiting for review, with a revision, and a draft) and forum questions, so a board search for `backup` shows its block; `--seed` with seed-forum's standard fixtures adds members to write them. Its two ACP pages are taken in full, so a new setting is not cut off.
+
 For example, ProMinoDeux's screenshots:
 
 ```bash

@@ -16,6 +16,7 @@ Exit status: 0 if every screenshot was saved, 1 if any failed, 2 for bad argumen
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -243,6 +244,293 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
                selector="#format-buttons", prepare=highlight_button)
 
 
+# The Knowledge Base's example content, as PHP run inside the board. It makes categories
+# and articles with the extension's own text formatter, indexes the live ones for search,
+# gives the board two forums for the article announcements and the moderators' changelog,
+# and posts three forum questions that the articles answer, so a board search for
+# "backup" shows the Knowledge Base block beside forum posts.
+KB_SEED_PHP = r"""
+$data = json_decode(<<<'JSON'
+@DATA@
+JSON, true);
+$language = $phpbb_container->get('language');
+$language->add_lang(['acp/common', 'acp/forums']);
+require_once $phpbb_root_path . 'includes/functions_acp.php';
+require_once $phpbb_root_path . 'includes/functions_admin.php';
+require_once $phpbb_root_path . 'includes/acp/acp_forums.php';
+require_once $phpbb_root_path . 'includes/functions_posting.php';
+require_once $phpbb_root_path . 'includes/functions_display.php';
+
+$admin = $db->sql_fetchrow($db->sql_query("SELECT * FROM " . USERS_TABLE . " WHERE username = 'admin'"));
+$user->data = array_merge($user->data, $admin, ['user_ip' => '127.0.0.1', 'is_registered' => true, 'is_bot' => false]);
+$user->ip = '127.0.0.1';
+$auth->acl($user->data);
+
+$members = [$admin];
+$result = $db->sql_query('SELECT * FROM ' . USERS_TABLE . ' WHERE user_type = 0 ORDER BY user_id LIMIT 2');
+while ($row = $db->sql_fetchrow($result)) { $members[] = $row; }
+$db->sql_freeresult($result);
+
+// -- forums: announcement, changelog and the one the questions go in
+function seed_forum($name, $desc) {
+    global $phpbb_root_path;
+    $acp_forums = new acp_forums();
+    $d = ['parent_id' => 0, 'forum_type' => FORUM_POST, 'type_action' => '', 'forum_status' => ITEM_UNLOCKED,
+        'forum_parents' => '', 'forum_name' => $name, 'forum_link' => '', 'forum_link_track' => false,
+        'forum_desc' => $desc, 'forum_desc_uid' => '', 'forum_desc_options' => 7, 'forum_desc_bitfield' => '',
+        'forum_rules' => '', 'forum_rules_uid' => '', 'forum_rules_options' => 7, 'forum_rules_bitfield' => '',
+        'forum_rules_link' => '', 'forum_image' => '', 'forum_style' => 0, 'display_subforum_list' => true,
+        'display_subforum_limit' => false, 'display_on_index' => true, 'forum_topics_per_page' => 0,
+        'enable_indexing' => true, 'enable_icons' => true, 'enable_prune' => false, 'enable_post_review' => true,
+        'enable_quick_reply' => false, 'enable_shadow_prune' => false, 'prune_days' => 7, 'prune_viewed' => 7,
+        'prune_freq' => 1, 'prune_old_polls' => false, 'prune_announce' => false, 'prune_sticky' => false,
+        'prune_shadow_days' => 7, 'prune_shadow_freq' => 1, 'forum_password' => '', 'forum_password_confirm' => '',
+        'forum_password_unset' => false, 'forum_options' => 0, 'show_active' => true];
+    $errors = $acp_forums->update_forum_data($d);
+    if ($errors) { throw new RuntimeException('forum ' . $name . ': ' . implode(', ', $errors)); }
+    // the permissions of the board's first forum, as the ACP's copy option gives
+    copy_forum_permissions(2, $d['forum_id'], false);
+    return (int) $d['forum_id'];
+}
+$announce_forum = seed_forum('Knowledge Base Comments', 'Discussion of the Knowledge Base articles.');
+$changelog_forum = seed_forum('Knowledge Base Changelog', 'Moderators only: what changed in each article.');
+$help_forum = seed_forum('Help and Questions', 'Ask the community for help.');
+$groups = [];
+$result = $db->sql_query("SELECT group_id, group_name FROM " . GROUPS_TABLE . " WHERE group_name IN ('ADMINISTRATORS', 'GLOBAL_MODERATORS')");
+while ($row = $db->sql_fetchrow($result)) { $groups[$row['group_name']] = (int) $row['group_id']; }
+$db->sql_freeresult($result);
+$phpbb_container->get('config_text')->set('kb_team_groups', json_encode(array_values($groups)));
+$config->set('kb_contact_group', isset($groups['GLOBAL_MODERATORS']) ? $groups['GLOBAL_MODERATORS'] : 0);
+$config->set('kb_forum_id', $announce_forum);
+$config->set('kb_anounce', 1);
+$config->set('kb_changelog_forum_id', $changelog_forum);
+
+// -- categories (nested set: left and right numbers run through the tree)
+$categories_table = $phpbb_container->getParameter('tables.categories_table');
+$articles_table = $phpbb_container->getParameter('tables.articles_table');
+$ids = [];
+$next = 1;
+$walk = function (array $nodes, $parent) use (&$walk, &$next, &$ids, $db, $categories_table) {
+    foreach ($nodes as $node) {
+        $left = $next++;
+        $db->sql_query('INSERT INTO ' . $categories_table . ' ' . $db->sql_build_array('INSERT', [
+            'parent_id' => $parent, 'left_id' => $left, 'right_id' => 0, 'category_parents' => '',
+            'category_name' => $node['name'], 'category_details' => $node['details']]));
+        $id = (int) $db->sql_nextid();
+        $ids[$node['key']] = $id;
+        $walk(isset($node['children']) ? $node['children'] : [], $id);
+        $db->sql_query('UPDATE ' . $categories_table . ' SET right_id = ' . $next++ . ' WHERE category_id = ' . $id);
+    }
+};
+$walk($data['categories'], 0);
+
+// -- articles
+$kb = $phpbb_container->get('phpbbmodders.knowledgebase.inc');
+$text = $phpbb_container->get('phpbbmodders.knowledgebase.article_text');
+$search = $phpbb_container->get('phpbbmodders.knowledgebase.search.backend_factory')->get_active();
+$now = time();
+$article_ids = [];
+foreach ($data['articles'] as $a) {
+    $body = $a['text'];
+    $uid = $bitfield = $options = '';
+    $text->store($body, !empty($a['markdown']), $uid, $bitfield, $options);
+    $author = $members[min($a['author'], count($members) - 1)];
+    $written = $now - (int) ($a['days'] * 86400);
+    $edited = empty($a['edited_days']) ? $written : $now - (int) ($a['edited_days'] * 86400);
+    $db->sql_query('INSERT INTO ' . $articles_table . ' ' . $db->sql_build_array('INSERT', [
+        'article_category_id' => $ids[$a['category']], 'approved' => $a['approved'], 'status' => $a['status'],
+        'article_title' => $a['title'], 'article_description' => $a['description'], 'article_body' => $body,
+        'bbcode_uid' => $uid, 'article_markdown' => empty($a['markdown']) ? 0 : 1,
+        'author_id' => (int) $author['user_id'], 'author' => $author['username'], 'author_type' => 0,
+        'article_date' => $written, 'edit_date' => $edited, 'views' => $a['views']]));
+    $id = (int) $db->sql_nextid();
+    $article_ids[$a['key']] = $id;
+    if ($a['approved'] && $a['status'] == 2) {
+        $plain = $a['text'];
+        $title = $a['title'];
+        $description = $a['description'];
+        $search->index('add', $id, $plain, $title, $description, (int) $author['user_id']);
+    }
+    if (!empty($a['revision'])) {
+        $kb->save_article_revision($id, ['article_title' => $a['title'], 'article_description' => $a['description'],
+            'article_body' => $a['revision'], 'bbcode_uid' => '', 'bbcode_bitfield' => ''], (int) $author['user_id']);
+    }
+}
+foreach ($ids as $key => $category_id) {
+    $db->sql_query('UPDATE ' . $categories_table . ' SET number_articles = (SELECT COUNT(*) FROM ' . $articles_table
+        . ' WHERE article_category_id = ' . $category_id . ' AND approved = 1 AND status = 2) WHERE category_id = ' . $category_id);
+}
+
+// -- forum questions the articles answer
+function seed_post($poster, $forum, $subject, $message, $topic = 0) {
+    global $db, $user, $auth;
+    $keep = $user->data;
+    $user->data = array_merge($keep, $poster, ['user_ip' => '127.0.0.1', 'is_registered' => true, 'is_bot' => false]);
+    $auth->acl($user->data);
+    $uid = $bitfield = '';
+    $options = 0;
+    generate_text_for_storage($message, $uid, $bitfield, $options, true, true, true);
+    $d = ['forum_id' => $forum, 'topic_id' => $topic, 'topic_title' => $subject, 'icon_id' => 0,
+        'poster_id' => (int) $poster['user_id'], 'enable_bbcode' => true, 'enable_smilies' => true, 'enable_urls' => true,
+        'enable_sig' => false, 'message' => $message, 'message_md5' => md5($message), 'bbcode_uid' => $uid,
+        'bbcode_bitfield' => $bitfield, 'enable_indexing' => true, 'notify' => false, 'notify_set' => false,
+        'post_edit_locked' => false, 'topic_time_limit' => 0, 'topic_status' => ITEM_UNLOCKED, 'forum_name' => '',
+        'force_approved_state' => ITEM_APPROVED];
+    $poll = [];
+    submit_post($topic ? 'reply' : 'post', $subject, '', POST_NORMAL, $poll, $d);
+    $user->data = $keep;
+    $auth->acl($user->data);
+    return (int) $d['topic_id'];
+}
+foreach ($data['questions'] as $i => $q) {
+    $asker = $members[1 + ($i % max(1, count($members) - 1))] ?? $admin;
+    $topic = seed_post($asker, $help_forum, $q['title'], $q['question']);
+    seed_post($admin, $help_forum, 'Re: ' . $q['title'], $q['answer'], $topic);
+}
+$config->set('kb_articles_per_page', 10);
+echo "\nKB-CATEGORIES:" . json_encode($ids) . "\n";
+"""
+
+KB_CATEGORIES = [
+    {"key": "start", "name": "Getting Started", "details": "First steps with the board.", "children": [
+        {"key": "install", "name": "Installation", "details": "Install the board on your own server."},
+        {"key": "first", "name": "First Steps", "details": "Accounts, forums and your first post."}]},
+    {"key": "ops", "name": "Board Operations", "details": "Run, protect and recover a live community.", "children": [
+        {"key": "backups", "name": "Backups and Recovery", "details": "Backup plans and restoration drills."},
+        {"key": "security", "name": "Security", "details": "Permissions, updates and access control."}]},
+    {"key": "ref", "name": "Reference", "details": "Commands, settings and terms."},
+]
+
+LIVE, PENDING, DRAFT = (2, 1), (0, 0), (4, 1)
+# status values: 0 new, 2 active, 4 draft (see inc/functions_kb.php); each article is (status, approved)
+
+
+def kb_article(key: str, category: str, title: str, description: str, text: str, days: float, views: int = 0,
+               author: int = 0, markdown: bool = False, state: tuple = LIVE, edited_days: float = 0,
+               revision: str = "") -> dict:
+    """One example article for KB_SEED_PHP."""
+    return {"key": key, "category": category, "title": title, "description": description, "text": text,
+            "days": days, "views": views, "author": author, "markdown": markdown, "status": state[0],
+            "approved": state[1], "edited_days": edited_days, "revision": revision}
+
+
+KB_ARTICLES = [
+    kb_article("backup", "backups", "Backing Up Your Board",
+               "What to copy before an upgrade, and how to restore it.",
+               "# Backing up your board\n\nA backup has two parts: the database and the files.\n\n## What to copy\n\n"
+               "1. Export the **database** with your host's tools or `mysqldump`.\n"
+               "2. Copy the `files/`, `store/` and `images/` folders and `config.php`.\n"
+               "3. Keep the copy somewhere other than the server.\n\n## Restoring\n\nImport the database, put the "
+               "folders back and purge the cache.\n\n```\nphp bin/phpbbcli.php cache:purge\n```\n\n"
+               "See [Restore drills](#restoring) before you need it.", 9, 412, markdown=True, edited_days=1),
+    kb_article("restore", "backups", "Restore Drills",
+               "Practise a restore before an incident.",
+               "[b]Restore drills[/b]\n\nA backup you have never restored is a guess.\n[list][*]Restore into a spare "
+               "database.[*]Check that you can log in.[*]Note how long it took.[/list]", 14, 188, author=1),
+    kb_article("opsoverview", "ops", "Running a Board Day to Day",
+               "The routine jobs that keep a community healthy.",
+               "Check the reports queue, read the error log and make sure last night's backup finished.",
+               4, 76, author=1),
+    kb_article("backupplan", "backups", "Choosing a Backup Schedule",
+               "How often to take a backup, and how many to keep.",
+               "Take a database backup every day and a file backup every week. Keep the last seven daily "
+               "backups and the last four weekly ones.", 20, 97, author=2),
+    kb_article("install", "install", "Installing the Board",
+               "Step-by-step installation notes.",
+               "# Installing the board\n\nUpload the files, open `install/` in your browser and follow the steps.\n\n"
+               "Before you start, make a backup of anything already on the server.", 25, 640, markdown=True),
+    kb_article("requirements", "install", "Server Requirements",
+               "What your server needs.", "You need PHP 8.2 or later, a database and write access to a few folders.",
+               27, 233, author=1),
+    kb_article("welcome", "start", "Welcome to the Knowledge Base",
+               "Start here.", "[b]Welcome![/b] These articles answer the questions members ask most.",
+               30, 891),
+    kb_article("accounts", "first", "Creating Your Account",
+               "Register, confirm and set up your profile.",
+               "Register from the link at the top of the board, confirm your e-mail address and fill in your profile.",
+               28, 120, author=2),
+    kb_article("permissions", "security", "Understanding Permissions",
+               "Who can do what, and how to change it.",
+               "# Permissions\n\nPermissions belong to groups. Give a group a right, and every member of it has "
+               "that right.\n\nAlways **test** a change as an ordinary member.", 16, 301, markdown=True, author=1,
+               edited_days=2),
+    kb_article("updates", "security", "Keeping the Board Up to Date",
+               "Why and how to upgrade.", "Install every security release as soon as it is out, and back up first.",
+               11, 150),
+    kb_article("commands", "ref", "Command Reference",
+               "Commands for maintaining a board.",
+               "[code]php bin/phpbbcli.php cache:purge\nphp bin/phpbbcli.php extension:enable vendor/name[/code]",
+               33, 175, author=2),
+    # waiting for review
+    kb_article("pending1", "security", "Hardening Your Server",
+               "Settings that make an attack harder.", "Draft text about server hardening, waiting for review.",
+               0.5, 0, author=1, state=PENDING),
+    kb_article("pending2", "security", "Glossary",
+               "Short definitions of common terms.", "Short definitions of terms used on the board.", 0.2, 0,
+               author=2, state=PENDING),
+    # a live article with a revision waiting for review
+    kb_article("withrevision", "first", "Writing Your First Post",
+               "Start a topic and reply to one.", "Open a forum, choose New Topic, write your post and submit it.",
+               6, 210, author=1,
+               revision="Open a forum, choose New Topic, write your post and submit it. Use Preview first."),
+    # the admin's own draft
+    kb_article("draft", "install", "Moving to a New Server",
+               "Notes for a later article.", "Notes about moving a board: copy the files, then the database.",
+               0.1, 0, state=DRAFT),
+]
+
+KB_QUESTIONS = [
+    {"title": "How do I back up my board before an upgrade?",
+     "question": "I am about to upgrade and want a backup first. Is there a guide to backing up the database and "
+                 "the files, and to restoring it afterwards?",
+     "answer": "Yes, the Knowledge Base has an article on backing up your board and one on restore drills."},
+    {"title": "Where is the installation guide?",
+     "question": "I just downloaded the board and want to install it on my own server. Is there a guide for the "
+                 "installation?",
+     "answer": "See Installing the Board in the Knowledge Base."},
+    {"title": "How often should I take a backup?",
+     "question": "Is a weekly backup enough for a small board, or should I back up every day?",
+     "answer": "Daily for the database is safer. The Knowledge Base explains a backup schedule."},
+]
+
+
+def shots_knowledgebase(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/knowledgebase: articles, the approval queue, search, the ACP and the recent changes page.
+
+    Makes its own categories, articles and forum questions, so --seed is only needed for
+    more forum content. The ACP pages are taken in full, so a new setting is not cut off.
+    """
+    data = json.dumps({"categories": KB_CATEGORIES, "articles": KB_ARTICLES, "questions": KB_QUESTIONS})
+    out = board.php(KB_SEED_PHP.replace("@DATA@", data), check=True)
+    marker = [line for line in out.splitlines() if line.startswith("KB-CATEGORIES:")]
+    if not marker:
+        shown = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", out)).strip()
+        raise RuntimeError(f"the Knowledge Base seed gave no category ids: {shown[:600]}")
+    category = json.loads(marker[-1].split(":", 1)[1])
+    article = board.sql("SELECT article_id FROM phpbb_kb_articles WHERE article_title = 'Backing Up Your Board'")[0][0]
+    board.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'kb_hierarchical_index'")
+    board.purge_cache()
+
+    kb = "app.php/knowledgebase"
+    acp = "adm/index.php?i=-phpbbmodders-knowledgebase-acp-{}_module&mode={}&sid={{sid}}"
+    shoot.shot("01-flat-index", f"{kb}?sid={{sid}}", admin=True)
+    shoot.shot("02-article", f"{kb}/article?k={article}&sid={{sid}}", admin=True)
+    shoot.shot("03-manage-your-articles", f"{kb}/my_articles?sid={{sid}}", admin=True)
+    shoot.shot("04-add-article", f"{kb}/posting?id={category['install']}&sid={{sid}}", admin=True)
+    shoot.shot("05-approval-queue", f"{kb}/queue?sid={{sid}}", admin=True)
+    shoot.shot("06-search-results", f"{kb}/search?keywords=backup&sid={{sid}}", admin=True)
+    shoot.shot("07-acp-configuration", acp.format("config", "settings"), admin=True, full_page=True)
+    shoot.shot("09-board-search-kb-block", "search.php?keywords=backup&sid={sid}", admin=True)
+    shoot.shot("10-advanced-search-option", "search.php?sid={sid}", admin=True, selector=".panel:has(#kb_also)")
+    shoot.shot("11-acp-search-settings", acp.format("search", "index"), admin=True, full_page=True)
+    shoot.shot("12-recent-changes", f"{kb}/recent_changes?sid={{sid}}", admin=True)
+
+    # The category tree is the one page that needs hierarchical browsing switched on.
+    board.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'kb_hierarchical_index'")
+    board.purge_cache()
+    shoot.shot("08-category-tree", f"{kb}?sid={{sid}}", admin=True)
+
+
 # Made-up values for the StopForumSpam screenshots. Nothing is ever sent to
 # stopforumspam.com: the pages shown only read the board's own data and logs.
 SFS_EXAMPLE_API_KEY = "0123456789abcdef"
@@ -328,6 +616,7 @@ def shots_sfscompanion(board: Board, shoot: Shooter, args: argparse.Namespace) -
 
 SHOTS = {
     "phpbbmodders/documentation": shots_documentation,
+    "phpbbmodders/knowledgebase": shots_knowledgebase,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
     "phpbbmodders/wiki": shots_wiki,
