@@ -375,6 +375,15 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
         # The lock beside a protected article's title in a list
         shoot.shot("wiki-protected-list", "app.php/wiki/recent-changes?sid={sid}", admin=True, selector=".forumbg")
 
+    # A Start template that asks for its values before it fills a new article
+    add_article("Template:Start Release",
+                "<noinclude>A release note: asks for the version, the date and who made it.</noinclude>"
+                "== Release {{{version|1.0}}} ==\nReleased on {{{date}}} by {{{1}}}.",
+                "A release note", days_ago=4)
+    board.purge_cache()
+    shoot.shot("wiki-start-values", "app.php/wiki/Release%202.0?action=edit&start_from=Start%20Release&sid={sid}",
+               admin=True, selector="#page-body")
+
     def highlight_button(p) -> None:
         p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
     shoot.shot("wiki-link-button", "app.php/wiki/Requirements?action=edit&sid={sid}", admin=True,
