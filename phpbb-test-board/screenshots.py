@@ -177,8 +177,8 @@ def php_string(text: str) -> str:
 
 def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/wiki: overview, articles, editing, approval, links between articles, moving, the
-    lists of templates and categories, an infobox and navbox, the ACP Starter templates page, and the notice
-    and the lock for two people editing one article."""
+    lists of templates and categories, an infobox and navbox, the ACP Starter templates page, the notice
+    and the lock for two people editing one article, and per-article edit protection."""
     def add_article(title: str, text: str, description: str = "", views: int = 0, sticky: int = 0,
                     approved: int = 1, days_ago: float = 0, edit_reason: str = "") -> int:
         """Store one article version as the edit form does: the text escaped as phpBB's request
@@ -357,6 +357,21 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
         # Back to the default, with nobody editing, for the shots that follow
         board.php("$config->set('wiki_edit_conflict', 'notice');"
                   "$db->sql_query('DELETE FROM ' . $table_prefix . 'wiki_edit_lock');", check=True)
+
+    # Per-article edit protection: the Protect article page with a group ticked, and the note on a
+    # protected article. Only when the extension has protection.
+    has_protection = board.php("echo class_exists('\\\\phpbbmodders\\\\wiki\\\\wiki\\\\protection') ? 'yes' : 'no';").strip().endswith("yes")
+    if has_protection:
+        # Configuration, protected for the global moderators
+        board.php("$result = $db->sql_query('SELECT group_id FROM ' . GROUPS_TABLE . \" WHERE group_name = 'GLOBAL_MODERATORS'\");"
+                  "$group_id = (int) $db->sql_fetchfield('group_id');"
+                  "$db->sql_freeresult($result);"
+                  "$db->sql_query('INSERT INTO ' . $table_prefix . 'wiki_article_protect ' . $db->sql_build_array('INSERT', "
+                  "['article_url' => 'Configuration', 'group_id' => $group_id]));",
+                  check=True)
+        board.purge_cache()
+        shoot.shot("wiki-protect", "app.php/wiki/Configuration?action=protect&sid={sid}", admin=True)
+        shoot.shot("wiki-protected-article", "app.php/wiki/Configuration?sid={sid}", admin=True)
 
     def highlight_button(p) -> None:
         p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
