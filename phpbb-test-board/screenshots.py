@@ -384,6 +384,23 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     shoot.shot("wiki-start-values", "app.php/wiki/Release%202.0?action=edit&start_from=Start%20Release&sid={sid}",
                admin=True, selector="#page-body")
 
+    # The admin's own BBCodes, one of them made wiki-only. Only when the extension has the setting.
+    has_wiki_only = board.php("echo class_exists('\\\\phpbbmodders\\\\wiki\\\\wiki\\\\wiki_only_bbcodes') ? 'yes' : 'no';").strip().endswith("yes")
+    if has_wiki_only:
+        board.php("$ids = [];"
+                  "foreach ([['note=', '[note={SIMPLETEXT}]{TEXT}[/note]', '<div class=\"note\"><b>{SIMPLETEXT}</b> {TEXT}</div>', 'Note box: [note=Title]text[/note]'],"
+                  " ['youtube', '[youtube]{URL}[/youtube]', '<a href=\"{URL}\">{URL}</a>', 'YouTube video: [youtube]link[/youtube]']] as $i => $b) {"
+                  "  $ids[] = NUM_CORE_BBCODES + $i + 1;"
+                  "  $db->sql_query('INSERT INTO ' . BBCODES_TABLE . ' ' . $db->sql_build_array('INSERT', ["
+                  "    'bbcode_id' => NUM_CORE_BBCODES + $i + 1, 'bbcode_tag' => $b[0], 'bbcode_match' => $b[1], 'bbcode_tpl' => $b[2],"
+                  "    'bbcode_helpline' => $b[3], 'display_on_posting' => 1, 'first_pass_match' => '', 'first_pass_replace' => '',"
+                  "    'second_pass_match' => '', 'second_pass_replace' => '']));"
+                  "}"
+                  "$config->set('wiki_only_bbcodes', (string) $ids[0]);", check=True)
+        board.purge_cache()
+        shoot.shot("wiki-acp-bbcodes", "adm/index.php?i=-phpbbmodders-wiki-acp-bbcodes_module&mode=settings&sid={sid}",
+                   admin=True, full_page=True)
+
     def highlight_button(p) -> None:
         p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
     shoot.shot("wiki-link-button", "app.php/wiki/Requirements?action=edit&sid={sid}", admin=True,
