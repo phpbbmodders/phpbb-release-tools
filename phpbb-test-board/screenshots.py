@@ -177,7 +177,8 @@ def php_string(text: str) -> str:
 
 def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/wiki: overview, articles, editing, approval, links between articles, moving, the
-    lists of templates and categories, an infobox and navbox, and the ACP Starter templates page."""
+    lists of templates and categories, an infobox and navbox, the ACP Starter templates page, and the notice
+    and the lock for two people editing one article."""
     def add_article(title: str, text: str, description: str = "", views: int = 0, sticky: int = 0,
                     approved: int = 1, days_ago: float = 0, edit_reason: str = "") -> int:
         """Store one article version as the edit form does: the text escaped as phpBB's request
@@ -325,6 +326,37 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     shoot.shot("wiki-acp-starter-templates",
                "adm/index.php?i=-phpbbmodders-wiki-acp-templates_module&mode=settings&sid={sid}", admin=True,
                full_page=True)
+
+    # Two people editing one article: the notice on the edit form, and with the lock, the page a
+    # second editor gets. Only when the extension has the edit lock.
+    has_lock = board.php("echo class_exists('\\\\phpbbmodders\\\\wiki\\\\wiki\\\\edit_lock') ? 'yes' : 'no';").strip().endswith("yes")
+    if has_lock:
+        # Another member, who has the article open; the board is restored from a clean copy each run
+        other = int(board.php(
+            "$id = user_add(['username' => 'Jane Editor', 'user_password' => '', 'user_email' => 'jane@example.com', "
+            "'group_id' => 2, 'user_type' => USER_NORMAL, 'user_lang' => 'en', 'user_regdate' => time()]);"
+            "echo $id;", check=True).strip().splitlines()[-1])
+
+        def edit_conflict(mode: str, article: str) -> None:
+            """Set the board's mode and record the other member as editing the article since a while ago."""
+            board.php("$config->set('wiki_edit_conflict', " + php_string(mode) + ");"
+                      "$db->sql_query('DELETE FROM ' . $table_prefix . 'wiki_edit_lock');"
+                      "$db->sql_query('INSERT INTO ' . $table_prefix . 'wiki_edit_lock ' . $db->sql_build_array('INSERT', "
+                      "['article_url' => " + php_string(article) + ", 'user_id' => " + str(other) + ", "
+                      "'lock_time' => time() - 720, 'lock_expires' => time() + 1080, 'blocked_notified' => 1]));",
+                      check=True)
+            board.purge_cache()
+
+        edit_conflict("notice", "Getting Started")
+        shoot.shot("wiki-edit-notice", "app.php/wiki/Getting%20Started?action=edit&sid={sid}", admin=True,
+                   selector="#postingbox")
+        edit_conflict("lock", "Installation")
+        shoot.shot("wiki-edit-locked", "app.php/wiki/Installation?action=edit&sid={sid}", admin=True)
+        shoot.shot("wiki-acp-settings", "adm/index.php?i=-phpbbmodders-wiki-acp-main_module&mode=settings&sid={sid}",
+                   admin=True, full_page=True)
+        # Back to the default, with nobody editing, for the shots that follow
+        board.php("$config->set('wiki_edit_conflict', 'notice');"
+                  "$db->sql_query('DELETE FROM ' . $table_prefix . 'wiki_edit_lock');", check=True)
 
     def highlight_button(p) -> None:
         p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
