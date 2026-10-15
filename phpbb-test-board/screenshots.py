@@ -372,6 +372,8 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
         board.purge_cache()
         shoot.shot("wiki-protect", "app.php/wiki/Configuration?action=protect&sid={sid}", admin=True)
         shoot.shot("wiki-protected-article", "app.php/wiki/Configuration?sid={sid}", admin=True)
+        # The lock beside a protected article's title in a list
+        shoot.shot("wiki-protected-list", "app.php/wiki/recent-changes?sid={sid}", admin=True, selector=".forumbg")
 
     def highlight_button(p) -> None:
         p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
