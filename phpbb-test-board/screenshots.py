@@ -170,28 +170,33 @@ def shots_prominodeux(board: Board, shoot: Shooter, args: argparse.Namespace) ->
     shoot.shot("prominodeux-viewtopic-phone", f"viewtopic.php?t={topic}", phone=True)
 
 
+def php_string(text: str) -> str:
+    """A PHP single-quoted string literal holding text exactly: no $ expansion, Unicode kept as is."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
-    """phpbbmodders/wiki: overview, articles, editing, approval, links between articles, moving, and the
-    lists of templates and categories."""
+    """phpbbmodders/wiki: overview, articles, editing, approval, links between articles, moving, the
+    lists of templates and categories, an infobox and navbox, and the ACP Starter templates page."""
     def add_article(title: str, text: str, description: str = "", views: int = 0, sticky: int = 0,
                     approved: int = 1, days_ago: float = 0, edit_reason: str = "") -> int:
         """Store one article version as the edit form does: the text escaped as phpBB's request
         escapes what is typed (so an entity such as &#32; arrives as written), then parsed with
         the wiki's markup on, so categories and templates are read; return its id."""
         out = board.php(
-            "$t = " + json.dumps(text) + "; $uid = $bit = ''; $flags = 0; $typed = $t;"
+            "$t = " + php_string(text) + "; $uid = $bit = ''; $flags = 0; $typed = $t;"
             "(new \\phpbb\\request\\type_cast_helper())->set_var($t, $typed, 'string', true);"
             "\\phpbbmodders\\wiki\\wiki\\markup::set_active(true);"
             "generate_text_for_storage($t, $uid, $bit, $flags, true, true, true);"
             "\\phpbbmodders\\wiki\\wiki\\markup::set_active(false);"
             "$when = time() - " + str(int(days_ago * 86400)) + ";"
             "$db->sql_query('INSERT INTO ' . $table_prefix . 'wiki_article ' . "
-            "$db->sql_build_array('INSERT', ['article_title' => " + json.dumps(title) + ", 'article_url' => "
-            + json.dumps(title) + ", 'article_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit, "
+            "$db->sql_build_array('INSERT', ['article_title' => " + php_string(title) + ", 'article_url' => "
+            + php_string(title) + ", 'article_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit, "
             "'article_approved' => " + str(approved) + ", 'article_user_id' => 2, 'article_last_edit' => $when, "
             "'article_time_created' => $when, 'article_sources' => '', 'article_description' => "
-            + json.dumps(description) + ", 'article_views' => " + str(views) + ", 'article_sticky' => "
-            + str(sticky) + ", 'article_edit_reason' => " + json.dumps(edit_reason) + "]));"
+            + php_string(description) + ", 'article_views' => " + str(views) + ", 'article_sticky' => "
+            + str(sticky) + ", 'article_edit_reason' => " + php_string(edit_reason) + "]));"
             "echo $db->sql_nextid();",
             check=True)
         return int(out.strip().splitlines()[-1])
@@ -237,6 +242,53 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
                           guide + "\n\nTo quote another post, click [i]Quote[/i] below it.",
                           "How to format posts with BBCode.", views=37, approved=0, days_ago=0.1,
                           edit_reason="Added a note about quoting")
+    # An infobox, a navbox and centred text, as the starter templates draw them
+    infobox = ('<table class="infobox"><caption>{{{title|}}}</caption>'
+               '{{#if:{{{above|}}}|<tr><th colspan="2">{{{above}}}</th></tr>}}'
+               + "".join('{{#if:{{{data%d|}}}|<tr><th>{{{label%d}}}</th><td>{{{data%d}}}</td></tr>}}' % (i, i, i)
+                         for i in range(1, 6))
+               + '</table>')
+    def starter_file(name: str, text: str) -> str:
+        """A starter template file: the attribution header the Starter templates page asks for, then text."""
+        slug = name.replace(" ", "_")
+        return ("<noinclude>\nSource: https://en.wikipedia.org/wiki/Template:" + slug + "\n"
+                "Adapted by phpBB Modders.\nChanges: rewritten for the wiki.\n"
+                "Licence: CC BY-SA 4.0, https://creativecommons.org/licenses/by-sa/4.0/\n</noinclude>" + text)
+    # As if installed from the starter templates, so its file below shows as already installed
+    infobox_page = starter_file("Infobox", infobox)
+    add_article("Template:Infobox", infobox_page, "A box of facts at the right of an article", days_ago=5)
+    navbox = ('<details class="navbox" open><summary>{{{title|}}}</summary><table>'
+              + "".join('{{#if:{{{list%d|}}}|<tr><th>{{{group%d}}}</th><td>{{{list%d}}}</td></tr>}}' % (i, i, i)
+                        for i in range(1, 4))
+              + '</table></details>')
+    add_article("Template:Navbox", "<noinclude>Links to related articles, in a box the reader can close."
+                "</noinclude>" + navbox, "Links to related articles", days_ago=5)
+    add_article("Wiki extension",
+                "{{Infobox|title=Wiki|above=phpBB extension|label1=Version|data1=1.1.0-a2-dev|label2=Requires"
+                "|data2=phpBB 3.3.19 or later|label3=Licence|data3=GPL-2.0|label4=Developer|data4=phpBB Modders}}"
+                "The [b]Wiki[/b] extension adds a wiki to a phpBB board. Members write and edit articles, every "
+                "edit is kept as a version, and moderators approve changes before they go live. Articles link to "
+                "each other with [[Getting Started|double square brackets]], and templates such as the box on "
+                "the right keep repeated content in one place.\n\n<center>[i]Every article can be changed, "
+                "compared and restored.[/i]</center>\n\n{{Navbox|title=Wiki help|group1=Start|list1=[[Getting "
+                "Started]] · [[Installation]] · [[Requirements]]|group2=Writing|list2=[[Formatting Guide]] · "
+                "[[Frequently Asked Questions]]|group3=Settings|list3=[[Configuration]]}}",
+                "What the wiki extension does.", views=12, days_ago=2)
+
+    # Template files for the Starter templates page: two new, one the board already has, and one
+    # whose page was edited on the board, so the list shows each kind of row
+    files = {
+        "Main": starter_file("Main", "[i]Main article: [[{{{1}}}]][/i]"),
+        "Stub": starter_file("Stub", "<table><tr><td>[i]This article is a stub.[/i]</td></tr></table>"),
+        "Infobox": infobox_page,
+        "Out of date": starter_file("Out of date", "<table><tr><td>[b]This article may be out of date.[/b]"
+                                    "</td></tr></table>"),
+    }
+    board.php("$dir = $phpbb_root_path . 'store/phpbbmodders_wiki/templates/';"
+              "if (!is_dir($dir)) { mkdir($dir, 0777, true); }"
+              "foreach (json_decode(" + php_string(json.dumps(files)) + ", true) as $name => $text) {"
+              " file_put_contents($dir . $name . '.wiki', $text); }",
+              check=True)
     board.purge_cache()
 
     shoot.shot("wiki-overview", "app.php/wiki/?sid={sid}", admin=True, full_page=True)
@@ -268,6 +320,11 @@ def shots_wiki(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     shoot.shot("wiki-categories", "app.php/wiki/categories?sid={sid}", admin=True, full_page=True,
                prepare=open_help_and_first_row)
     shoot.shot("wiki-move", "app.php/wiki/Requirements?action=move&sid={sid}", admin=True)
+
+    shoot.shot("wiki-infobox-navbox", "app.php/wiki/Wiki%20extension?sid={sid}", admin=True, full_page=True)
+    shoot.shot("wiki-acp-starter-templates",
+               "adm/index.php?i=-phpbbmodders-wiki-acp-templates_module&mode=settings&sid={sid}", admin=True,
+               full_page=True)
 
     def highlight_button(p) -> None:
         p.add_style_tag(content=".bbcode-wikilink { outline: 3px solid #d31141; outline-offset: 2px; }")
