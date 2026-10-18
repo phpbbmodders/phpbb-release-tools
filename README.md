@@ -15,6 +15,12 @@ Tools for phpBB packages: Bash scripts that build release ZIPs and publish them 
 
 The scripts share their GitHub release code in [`lib/github-release.sh`](lib/github-release.sh). To put a script on your `PATH`, symlink it rather than copying it, so it can still find `lib/`.
 
+## Forum update posts
+
+Prepare BBCode update drafts with a dated screenshot folder and its own
+README gallery. See [BBCode update posts and screenshot galleries](docs/forum-update-posts.md)
+for the required layout, image links, sizing, and preparation checks.
+
 ## Requirements
 
 - `git-extensions.sh`: `git`, `jq`, `zip`
