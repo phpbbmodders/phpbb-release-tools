@@ -943,9 +943,40 @@ def shots_newspage(board: Board, shoot: Shooter, args: argparse.Namespace) -> No
     shoot.shot("newspage-news-no-filters", "app.php/news")
 
 
+FEEDLINKS_FORUMS = {
+    # Forum name from seed-forum's standard fixtures: 1 Atom, 2 RSS, 3 both
+    "General Discussion": 3,
+    "Introductions": 1,
+    "Reference Library": 2,
+}
+
+
+def shots_feedlinks(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/feedlinks: feed links on the board index and a forum page, and both ACP settings.
+
+    Needs a board with forums: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. Three of its forums get Atom, RSS and
+    both links. The ACP shots are cropped to the forum's general settings
+    and to the extension's own section of the feed settings.
+    """
+    for name, links in FEEDLINKS_FORUMS.items():
+        board.sql("UPDATE phpbb_forums SET forum_feedlinks = ? WHERE forum_name = ?", (links, name))
+    set_config(board, {"feedlinks_rss_head": "1"})
+    forum = board.sql("SELECT forum_id FROM phpbb_forums WHERE forum_name = ?", ("General Discussion",))[0][0]
+
+    shoot.shot("feedlinks-index", "index.php", selector="#page-body")
+    shoot.shot("feedlinks-viewforum", f"viewforum.php?f={forum}", selector="#page-body")
+    shoot.shot("feedlinks-index-phone", "index.php", phone=True)
+    shoot.shot("feedlinks-acp-forum", f"adm/index.php?i=acp_forums&mode=manage&action=edit&f={forum}&sid={{sid}}",
+               admin=True, selector="#forum_post_options fieldset")
+    shoot.shot("feedlinks-acp-feed", "adm/index.php?i=acp_board&mode=feed&sid={sid}",
+               admin=True, selector='fieldset:has(input[name="config[feedlinks_rss_head]"])')
+
+
 SHOTS = {
     "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/documentation": shots_documentation,
+    "phpbbmodders/feedlinks": shots_feedlinks,
     "phpbbmodders/knowledgebase": shots_knowledgebase,
     "phpbbmodders/newspage": shots_newspage,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
