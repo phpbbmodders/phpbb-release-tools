@@ -6,6 +6,9 @@ that says how they ended.
 Polls the pull request with the GitHub CLI (`gh pr view`) every --interval
 seconds. The checks followed are always those of the pull request's latest
 commit, so a new push while waiting restarts the wait on the new commit.
+The result counts only once the same finished checks have been seen for
+--settle seconds: GitHub can take a few seconds to add a run (for example a
+pull request's own run after an earlier push run already finished).
 Prints one line whenever the progress changes, and a summary at the end that
 lists every failed check with its link. Meant for a person or an agent that
 starts it in the background and acts on the exit status.
@@ -61,11 +64,14 @@ def parse_args(argv: list) -> argparse.Namespace:
     parser.add_argument('-w', '--first-check-wait', type=float, default=3,
                         help='minutes to wait for the first check to appear on a commit '
                              'before deciding the repository runs none (default: 3)')
+    parser.add_argument('-s', '--settle', type=float, default=30,
+                        help='seconds the same finished checks must stay unchanged before the '
+                             'result counts, so a run GitHub adds late is not missed (default: 30)')
     if not argv:
         parser.print_help(sys.stderr)
         sys.exit(2)
     args = parser.parse_args(argv)
-    for name in ('timeout', 'interval', 'first_check_wait'):
+    for name in ('timeout', 'interval', 'first_check_wait', 'settle'):
         if not getattr(args, name) > 0:
             parser.error(f"--{name.replace('_', '-')} must be greater than 0")
     return args
@@ -131,6 +137,9 @@ def wait(args: argparse.Namespace) -> int:
     head = None
     head_seen_at = start
     last_progress = None
+    # The finished checks last seen, and since when, for --settle
+    finished = None
+    finished_since = start
     gh_failures = 0
     waiting_for = 'an answer from gh'
     while True:
@@ -155,6 +164,7 @@ def wait(args: argparse.Namespace) -> int:
                 head = data['headRefOid']
                 head_seen_at = time.monotonic()
                 last_progress = None
+                finished = None
 
             checks = [classify(check) for check in data.get('statusCheckRollup') or []]
             pending = [c for c in checks if c[1] == 'pending']
@@ -164,14 +174,28 @@ def wait(args: argparse.Namespace) -> int:
                 say(f"{url} is {data['state'].lower()}; stopped waiting")
                 return EXIT_CLOSED
 
-            waiting_for = f'{len(pending)} running checks' if checks else 'the first check'
+            waiting_for = 'the first check'
+            if pending:
+                waiting_for = f'{len(pending)} running checks'
+            elif checks:
+                waiting_for = 'the finished checks to settle'
             progress = (len(checks), len(pending), len(failed))
             if checks and progress != last_progress:
                 say(f'{head[:7]}: {len(checks) - len(pending)} of {len(checks)} checks done, '
                     f'{len(failed)} failed')
                 last_progress = progress
 
-            if checks and not pending:
+            settled = False
+            if not checks or pending:
+                finished = None
+            else:
+                outcome = sorted((name, result) for name, _, result, _ in checks)
+                if outcome != finished:
+                    finished = outcome
+                    finished_since = time.monotonic()
+                settled = time.monotonic() - finished_since >= args.settle
+
+            if checks and not pending and settled:
                 if failed:
                     say(f'{url}: {len(failed)} of {len(checks)} checks failed on {head[:7]}')
                     for name, _, result, link in failed:
@@ -189,7 +213,11 @@ def wait(args: argparse.Namespace) -> int:
         if remaining <= 0:
             say(f'Gave up after {args.timeout:g} minutes, still waiting for {waiting_for}')
             return EXIT_TIMEOUT
-        time.sleep(min(args.interval, remaining))
+        pause = min(args.interval, remaining)
+        if finished is not None:
+            # Look again as soon as the finished checks have settled
+            pause = min(pause, max(args.settle - (time.monotonic() - finished_since), 0.01))
+        time.sleep(pause)
 
 
 def main() -> int:
