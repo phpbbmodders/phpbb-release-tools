@@ -777,7 +777,82 @@ def shots_sfscompanion(board: Board, shoot: Shooter, args: argparse.Namespace) -
                admin=True, selector=".panel:has(a[href*='sfs-companion/finder'])", prepare=highlight_link)
 
 
+CONTACTADMIN_CONFIG = {
+    # Private-message delivery to the founder, no captcha: matches the earlier screenshots
+    "contactadmin_method": "2",
+    "contactadmin_who": "2",
+    "contactadmin_confirm": "0",
+    "contactadmin_gdpr": "0",
+    "contactadmin_username_chk": "0",
+    "contactadmin_bot_poster": "1",
+    "contactadmin_forum": "2",
+    # Example addresses have no mail server
+    "email_check_mx": "0",
+}
+CONTACTADMIN_REASONS = "A question about the board\nA problem with my account\nSomething else"
+
+
+def set_config(board: Board, settings: dict) -> None:
+    """Set phpBB config values and purge the cache so the board reads them."""
+    for name, value in settings.items():
+        board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+    board.purge_cache()
+
+
+def shots_contactadmin(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/contactadmin: the contact form and its ACP settings.
+
+    contactadmin-acp-settings, -guest-form and -member-basic are the
+    documentation gallery (docs/images/screenshots/). contactadmin-acp-delivery,
+    -guest-checks and -guest-topic show the 10/18/2026 fixes for the dated
+    update gallery: the delivery settings with the board's email turned off,
+    the guest form with the username rules and privacy policy box, and a
+    guest's message posted by the contact bot, labelled "Guest User".
+    """
+    set_config(board, CONTACTADMIN_CONFIG)
+    acp = "adm/index.php?i=-phpbbmodders-contactadmin-acp-contactadmin_module&mode=configuration&sid={sid}"
+    shoot.shot("contactadmin-acp-settings", acp, admin=True, full_page=True)
+    shoot.shot("contactadmin-guest-form", "app.php/contactadmin")
+    shoot.shot("contactadmin-member-basic", "app.php/contactadmin?sid={sid}", admin=True)
+
+    shoot.shot("contactadmin-acp-delivery", acp, admin=True,
+               selector="fieldset:has(input[name='contact_method'])")
+    board.sql("UPDATE phpbb_config_text SET config_value = ? WHERE config_name = 'contactadmin_reasons'",
+              (CONTACTADMIN_REASONS,))
+    set_config(board, {"contactadmin_gdpr": "1", "contactadmin_username_chk": "1"})
+    shoot.shot("contactadmin-guest-checks", "app.php/contactadmin")
+
+    # Send a guest message by forum post, then show the topic the contact bot posted
+    set_config(board, {"contactadmin_method": "1", "contactadmin_gdpr": "0", "contactadmin_username_chk": "0"})
+    context = shoot.browser.new_context(viewport=DESKTOP, locale="en-GB")
+    page = context.new_page()
+    page.set_default_timeout(TIMEOUT_MS)
+    try:
+        page.goto(f"{board.base}/app.php/contactadmin", wait_until="networkidle")
+        page.fill("input[name=username]", "Jane Example")
+        page.fill("input[name=email]", "jane@example.com")
+        page.fill("input[name=email_confirm]", "jane@example.com")
+        page.select_option("select[name=contact_reason]", "A question about the board")
+        page.fill("textarea[name=message]", "Hello, how do I change the email address on my account?")
+        page.wait_for_timeout(1500)  # phpBB rejects forms submitted too quickly
+        page.click("input[name=submit]")
+        sent = "sent successfully" in page.inner_text("body")
+    finally:
+        context.close()
+    if not sent:
+        shoot.failed.append("contactadmin-guest-topic")
+        print("  [FAIL] contactadmin-guest-topic: the contact form did not send")
+        return
+    topic = board.sql("SELECT MAX(topic_id) FROM phpbb_topics")[0][0]
+
+    def hide_who_is_online(p) -> None:
+        p.add_style_tag(content=".stat-block { display: none; }")
+    shoot.shot("contactadmin-guest-topic", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True,
+               selector="#page-body", prepare=hide_who_is_online)
+
+
 SHOTS = {
+    "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/documentation": shots_documentation,
     "phpbbmodders/knowledgebase": shots_knowledgebase,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
