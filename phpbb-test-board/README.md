@@ -113,6 +113,8 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/newspage` replaces the board's welcome topic with four example news topics, the last one opening with a picture the script draws (and deletes afterwards), and makes that forum the news forum. It saves the news page with the first image above the text and without poster information or post buttons, one news item as the admin, the ACP settings (in full), the news page on a phone and filtered by forum, then the news page with poster information and post buttons on, shortened to 120 characters, and without the filters.
 
+`phpbbmodders/copylinks` clicks a topic title, a post subject and an FAQ question and shows each one's tick, with the copy to the clipboard stubbed, since headless Chromium may not write to it. Use `--seed` with seed-forum's standard fixtures for a topic with replies.
+
 For example, ProMinoDeux's screenshots:
 
 ```bash
