@@ -110,6 +110,8 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/knowledgebase` makes its own categories, articles (live, waiting for review, with a revision, and a draft) and forum questions, so a board search for `backup` shows its block; `--seed` with seed-forum's standard fixtures adds members to write them. Its two ACP pages are taken in full, so a new setting is not cut off.
 
+`phpbbmodders/newspage` replaces the board's welcome topic with three example news topics and makes that forum the news forum, with poster information and post buttons off. It saves the news page, one news item, the ACP settings (in full) and the news page on a phone, then the news page three more times: with poster information and post buttons on, shortened to 120 characters, and without the filters.
+
 For example, ProMinoDeux's screenshots:
 
 ```bash

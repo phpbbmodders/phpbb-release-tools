@@ -851,10 +851,85 @@ def shots_contactadmin(board: Board, shoot: Shooter, args: argparse.Namespace) -
                selector="#page-body", prepare=hide_who_is_online)
 
 
+NEWSPAGE_NEWS = [
+    ("Board upgraded to the latest phpBB release",
+     "We have moved the board to the latest phpBB release. Pages load faster, and the editor now "
+     "remembers your draft if you lose your connection.\n\n[b]What you need to do:[/b] nothing. "
+     "If something looks wrong, clear your browser cache and let us know in the Support forum."),
+    ("New members' area is open",
+     "The members' area now has its own forum for introductions and project showcases. "
+     "Say hello, tell us what you are working on, and share screenshots of your setup."),
+    ("Scheduled maintenance this weekend",
+     "The board will be read-only for about an hour on Saturday morning while we move to a new server. "
+     "Posts made just before the move are kept."),
+]
+
+NEWSPAGE_SEED = r"""
+require_once $phpbb_root_path . 'includes/functions_posting.php';
+require_once $phpbb_root_path . 'includes/functions_admin.php';
+// the install's welcome topic is in the same forum; the news page shows only the example news
+delete_topics('forum_id', [2]);
+$news = json_decode(%s, true);
+$keep = $user->data;
+$user->data = array_merge($keep, ['user_id' => 2, 'username' => 'admin', 'user_ip' => '127.0.0.1',
+    'is_registered' => true, 'is_bot' => false]);
+$auth->acl($user->data);
+$ids = [];
+foreach ($news as $i => $item) {
+    list($subject, $message) = $item;
+    $uid = $bitfield = '';
+    $options = 0;
+    generate_text_for_storage($message, $uid, $bitfield, $options, true, true, true);
+    $d = ['forum_id' => 2, 'topic_id' => 0, 'topic_title' => $subject, 'icon_id' => 0, 'poster_id' => 2,
+        'enable_bbcode' => true, 'enable_smilies' => true, 'enable_urls' => true, 'enable_sig' => false,
+        'message' => $message, 'message_md5' => md5($message), 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bitfield,
+        'enable_indexing' => true, 'notify' => false, 'notify_set' => false, 'post_edit_locked' => false,
+        'topic_time_limit' => 0, 'topic_status' => ITEM_UNLOCKED, 'forum_name' => '',
+        'force_approved_state' => ITEM_APPROVED, 'post_time' => time() - (count($news) - $i) * 86400];
+    $poll = [];
+    submit_post('post', $subject, '', POST_NORMAL, $poll, $d);
+    $ids[] = (int) $d['topic_id'];
+}
+$user->data = $keep;
+echo "\nNEWS-TOPICS:" . json_encode($ids) . "\n";
+"""
+
+
+def shots_newspage(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/newspage: the news page, one news item and the ACP settings.
+
+    Replaces the install's welcome topic in the board's first forum with three
+    news topics and makes it the news forum. Poster information and the post
+    buttons are turned off, so the news text stands out; the other settings
+    stay at their defaults. Three more shots of the news page show it with
+    poster information and post buttons on (as the admin, who sees every
+    button), with the news shortened to 120 characters, and without the
+    forum and date filters.
+    """
+    out = board.php(NEWSPAGE_SEED % php_string(json.dumps(NEWSPAGE_NEWS)), check=True)
+    topics = json.loads(out.split("NEWS-TOPICS:")[1].split()[0])
+    set_config(board, {"news_forums": "2", "news_user_info": "0", "news_post_buttons": "0"})
+
+    shoot.shot("newspage-news", "app.php/news")
+    shoot.shot("newspage-single", f"app.php/news/{topics[0]}")
+    shoot.shot("newspage-acp-settings", "adm/index.php?i=-phpbbmodders-newspage-acp-main_module&mode=settings&sid={sid}",
+               admin=True, full_page=True)
+    shoot.shot("newspage-news-phone", "app.php/news", phone=True)
+
+    # The same page with other settings, one change at a time
+    set_config(board, {"news_user_info": "1", "news_post_buttons": "1"})
+    shoot.shot("newspage-news-full", "app.php/news?sid={sid}", admin=True)
+    set_config(board, {"news_user_info": "0", "news_post_buttons": "0", "news_char_limit": "120"})
+    shoot.shot("newspage-news-shortened", "app.php/news")
+    set_config(board, {"news_char_limit": "500", "news_cat_show": "0", "news_archive_show": "0"})
+    shoot.shot("newspage-news-no-filters", "app.php/news")
+
+
 SHOTS = {
     "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/documentation": shots_documentation,
     "phpbbmodders/knowledgebase": shots_knowledgebase,
+    "phpbbmodders/newspage": shots_newspage,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
     "phpbbmodders/wiki": shots_wiki,
