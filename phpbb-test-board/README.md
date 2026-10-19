@@ -11,6 +11,7 @@ They build a board on SQLite and run an extension on it with PHP error logging o
 - `git`, `php` (with the `sqlite3` extension), `composer`, `curl`, `jq` and `openssl`
 - Python 3 with `venv`
 - ImageMagick's `convert`, for the reassignthumbs feature check
+- Docker, for `php-lint.sh`
 
 The Python scripts create their own virtualenv (`.venv` in this folder) on first run and install `requirements.txt` into it; nothing needs installing or activating by hand. `screenshots.py` also downloads Playwright's Chromium on its first run.
 
@@ -56,6 +57,16 @@ Runs the extension's `phpunit.xml.dist` the way [phpbb-extensions/test-framework
 - `-f PATTERN` runs only the matching tests; anything after `--` goes to PHPUnit, for example `-- --testdox` or, on `master`, `-- --display-skipped`.
 
 Exit status: PHPUnit's, 1 for a setup failure, 2 for bad arguments. Needs `git`, `php`, `composer`, `rsync` and `jq`.
+
+### `php-lint.sh`: syntax check on other PHP versions
+
+```bash
+phpbb-test-board/php-lint.sh path/to/extension [-p 7.4,8.4] [--strict]
+```
+
+Runs `php -l` on every PHP file under each PHP version (default 7.4 and 8.4), in a throwaway container from the official `php:VERSION-cli` image, so an extension can be checked against its minimum PHP without that PHP installed. The folder is mounted read-only, the container has no network and is removed afterwards; `vendor/`, `node_modules/` and `.git/` are skipped. Compile-time deprecation notices, such as implicitly nullable parameters on PHP 8.4, are shown, and fail the run only with `--strict`. It needs no board.
+
+Exit status: 0 when every file passes on every version, 1 when a file fails or Docker fails, 2 for bad arguments. The first run of a version pulls its image.
 
 ### `smoke_test.py`: does the extension break anything?
 
