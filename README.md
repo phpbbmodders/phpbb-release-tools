@@ -1,6 +1,6 @@
 # phpbb-release-tools
 
-Tools for phpBB packages: Bash scripts that build release ZIPs and publish them as GitHub Releases, and a local test board for testing extensions and styles and taking their documentation screenshots (`phpbb-test-board/`).
+Tools for phpBB packages: Bash scripts that build release ZIPs and publish them as GitHub Releases, and a local test board for testing extensions and styles and taking their documentation screenshots (`phpbb-test-board/`), and `pr-wait.py`, which waits for a pull request's checks to finish.
 
 ## Tools
 
@@ -29,6 +29,7 @@ for the required layout, image links, sizing, and preparation checks.
 - `git-release-api.sh`: `git`, `jq`, `zip`, and GNU coreutils (`timeout`, `mktemp`, `stat`).
 - `--gh-release` and `git-release-api.sh` also need an authenticated GitHub CLI (`gh`), `jq` and `timeout`, with permission to create releases and upload assets.
 - `phpbb-test-board/`: see [its README](phpbb-test-board/README.md#requirements).
+- `pr-wait.py`: Python 3.7 or later and an authenticated GitHub CLI (`gh`).
 
 ## Usage
 
@@ -93,6 +94,27 @@ A version ending in `-dev` is a rolling prerelease, including a build on the way
 
 The tag is reserved at the pinned commit before the release is created. A failure after tag creation may leave that tag without a release. The release stays a draft until its asset upload is confirmed. If uploading or publishing fails, the script reports the release URL and exits with an error. Inspect the remote state before retrying. For stable, alpha, beta, and RC versions a retry stops when it finds the existing tag or release. For a `-dev` version a retry reuses the leftover tag or draft release and finishes the update. A publication timeout may mean publication succeeded but could not be confirmed. Requests have finite timeouts and remote write requests are not retried automatically.
 
+### Waiting for a pull request's checks: `pr-wait.py`
+
+Waits until every check on a pull request has finished, then exits with a status that says how they ended, so a person or an agent can start it in the background and act on the result. It follows new pushes: the checks it waits for are always those of the pull request's latest commit. When checks fail, it lists each one with its link.
+
+```bash
+./pr-wait.py https://github.com/phpbbmodders/contactadmin/pull/42
+./pr-wait.py -R phpbbmodders/contactadmin 42 --timeout 30
+```
+
+| Exit status | Meaning |
+|---|---|
+| 0 | Every check passed (success, neutral or skipped) |
+| 1 | At least one check failed, was cancelled or timed out |
+| 2 | Bad arguments (with no arguments it prints help) |
+| 3 | The pull request was closed or merged first |
+| 4 | `--timeout` ran out first (default 60 minutes) |
+| 5 | No check appeared on the latest commit within `--first-check-wait` (default 3 minutes) |
+| 6 | `gh` is not installed, or failed five times in a row (not logged in, no such pull request, no network) |
+
+It asks GitHub every `--interval` seconds (default 30). Progress lines carry the time in UTC.
+
 ### Testing extensions and styles: `phpbb-test-board/`
 
 Builds a local phpBB 3.3 board on SQLite and tests extensions on it: `smoke_test.py` checks that an extension doesn't break any page, `feature_checks.py` exercises its main feature, and `screenshots.py` takes documentation screenshots of extensions and styles, `rename_upgrade.py` checks that an extension moved to a new vendor name upgrades cleanly from the old one, and `template_a11y.py` checks that icon-only links and buttons have a tooltip and screen-reader text. For local testing only.
@@ -111,9 +133,10 @@ See [`phpbb-test-board/README.md`](phpbb-test-board/README.md) for every script 
 tests/test-release-scripts.sh
 bash tests/test-release-api.sh
 tests/test-phpbb-test-board.sh
+tests/test-pr-wait.sh
 ```
 
-The tests run in a temporary directory; the release script tests are offline, and the test-board tests only check options and errors (the first run creates the Python virtualenv). GitHub Actions runs them, and ShellCheck, on every pull request.
+The tests run in a temporary directory; the release script tests are offline, the test-board tests only check options and errors (the first run creates the Python virtualenv), and the `pr-wait.py` tests use a fake `gh`. GitHub Actions runs them, and ShellCheck, on every pull request.
 
 ## Contributing
 

@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
 
       - name: ShellCheck
-        run: shellcheck -x git-extensions.sh git-release-api.sh git-release-style.sh git-release-langpack.sh lib/github-release.sh tests/test-release-scripts.sh tests/test-release-api.sh phpbb-test-board/setup-board.sh phpbb-test-board/run-unit-tests.sh phpbb-test-board/php-lint.sh tests/test-phpbb-test-board.sh
+        run: shellcheck -x git-extensions.sh git-release-api.sh git-release-style.sh git-release-langpack.sh lib/github-release.sh tests/test-release-scripts.sh tests/test-release-api.sh phpbb-test-board/setup-board.sh phpbb-test-board/run-unit-tests.sh phpbb-test-board/php-lint.sh tests/test-phpbb-test-board.sh tests/test-pr-wait.sh
 
       - name: Tests
         run: tests/test-release-scripts.sh
@@ -29,3 +29,6 @@ jobs:
 
       - name: phpbb-test-board option tests
         run: tests/test-phpbb-test-board.sh
+
+      - name: pr-wait.py tests
+        run: tests/test-pr-wait.sh
