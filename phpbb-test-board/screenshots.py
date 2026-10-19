@@ -947,7 +947,8 @@ def show_copied(selector: str) -> Callable:
     """A prepare() step for phpbbmodders/copylinks: click SELECTOR and wait for its tick.
 
     Headless Chromium has no clipboard permission, so the copy is stubbed to
-    succeed. The tick stays for two seconds; the shot is taken inside that.
+    succeed. The heading's icon turns into a tick for two seconds; the shot is
+    taken inside that.
     """
     def prepare(p) -> None:
         p.evaluate("Object.defineProperty(navigator, 'clipboard', "
@@ -957,14 +958,16 @@ def show_copied(selector: str) -> Callable:
         p.mouse.move(0, 0)
         p.evaluate("document.activeElement.blur()")
         p.wait_for_selector(".copylinks-copied")
-        p.wait_for_timeout(400)  # the tick fades in over 0.2s
+        p.wait_for_timeout(400)  # without the icon, the text tick fades in over 0.2s
     return prepare
 
 
 def shots_copylinks(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
-    """phpbbmodders/copylinks: the tick after copying a topic title, a post subject and an FAQ question.
+    """phpbbmodders/copylinks: the tick after copying a topic title, a post subject and an FAQ question,
+    and the ACP settings.
 
-    Use --seed with seed-forum's bin/seed-standard-fixtures.php for a topic
+    The headings show the extension's default icon, which turns into a tick
+    after a copy. Use --seed with seed-forum's bin/seed-standard-fixtures.php for a topic
     with replies. The post shot is the topic's second post, so its subject
     differs from the title.
     """
@@ -982,6 +985,8 @@ def shots_copylinks(board: Board, shoot: Shooter, args: argparse.Namespace) -> N
         p.add_style_tag(content=".panel:has(.copylinks-copied) dl.faq ~ * { display: none; }")
     shoot.shot("copylinks-faq", "app.php/help/faq", selector=".panel:has(.copylinks-copied)",
                prepare=first_question_only)
+    shoot.shot("copylinks-acp-settings", "adm/index.php?i=-phpbbmodders-copylinks-acp-main_module&mode=settings&sid={sid}",
+               admin=True)
 
 
 SHOTS = {
