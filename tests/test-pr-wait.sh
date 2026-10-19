@@ -71,7 +71,7 @@ scenario() {
 
 A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-fast=(-i 0.01)
+fast=(-i 0.01 -s 0.03)
 
 scenario 'no arguments print help' 2 'usage: pr-wait.py' </dev/null
 scenario 'an interval of 0 is refused' 2 'must be greater than 0' 1 -i 0 </dev/null
@@ -86,6 +86,14 @@ EOF
 scenario 'lists failed checks with their links' 1 'failure: CI / test  https://example.test/test' 1 "${fast[@]}" <<EOF
 $(pr OPEN "$A" run:lint:COMPLETED:SUCCESS run:test:COMPLETED:FAILURE)
 EOF
+
+scenario 'waits for a run GitHub adds after the others finished' 0 'all 2 checks passed' 1 -i 0.01 -s 0.05 <<EOF
+$(pr OPEN "$A" run:push-tests:COMPLETED:SUCCESS)
+$(pr OPEN "$A" run:push-tests:COMPLETED:SUCCESS run:pr-tests:QUEUED:)
+$(pr OPEN "$A" run:push-tests:COMPLETED:SUCCESS run:pr-tests:COMPLETED:SUCCESS)
+EOF
+
+scenario 'a settle time of 0 is refused' 2 'must be greater than 0' 1 -s 0 </dev/null
 
 scenario 'a cancelled check counts as failed' 1 'cancelled: CI / test' 1 "${fast[@]}" <<EOF
 $(pr OPEN "$A" run:test:COMPLETED:CANCELLED)

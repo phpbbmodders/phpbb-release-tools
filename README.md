@@ -113,7 +113,7 @@ Waits until every check on a pull request has finished, then exits with a status
 | 5 | No check appeared on the latest commit within `--first-check-wait` (default 3 minutes) |
 | 6 | `gh` is not installed, or failed five times in a row (not logged in, no such pull request, no network) |
 
-It asks GitHub every `--interval` seconds (default 30). Progress lines carry the time in UTC.
+It asks GitHub every `--interval` seconds (default 30). A result counts only once the same finished checks have been seen for `--settle` seconds (default 30), because GitHub can add a run a few seconds late, such as a pull request's own run after an earlier push run has already finished. Progress lines carry the time in UTC.
 
 ### Testing extensions and styles: `phpbb-test-board/`
 
