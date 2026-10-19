@@ -128,6 +128,9 @@ mkdir -p "$tmp/ext-no-phpunit" "$tmp/ext-bad-name"
 echo '{"name": "vendor/ext"}' >"$tmp/ext-no-phpunit/composer.json"
 echo '{"name": "Not A Name"}' >"$tmp/ext-bad-name/composer.json"
 touch "$tmp/ext-bad-name/phpunit.xml.dist"
+mkdir -p "$tmp/ext-bad-name/tests/functional" "$tmp/ext-no-functional"
+echo '{"name": "vendor/ext"}' >"$tmp/ext-no-functional/composer.json"
+touch "$tmp/ext-no-functional/phpunit.xml.dist"
 check "run-unit-tests.sh without arguments shows help and exits 0" \
   exits_with 0 "$tools/run-unit-tests.sh"
 check "run-unit-tests.sh --help shows usage" output_has "Usage: run-unit-tests.sh" "$tools/run-unit-tests.sh" --help
@@ -137,6 +140,10 @@ check "run-unit-tests.sh with an unknown branch exits 2" \
 check "run-unit-tests.sh with a missing directory exits 2" exits_with 2 "$tools/run-unit-tests.sh" "$tmp/no-such-dir"
 check "run-unit-tests.sh without phpunit.xml.dist exits 2" \
   exits_with 2 "$tools/run-unit-tests.sh" "$tmp/ext-no-phpunit"
+check "run-unit-tests.sh without tests/functional exits 2" \
+  exits_with 2 "$tools/run-unit-tests.sh" "$tmp/ext-no-functional"
+check "run-unit-tests.sh says how to add tests/functional" \
+  output_has "mkdir -p tests/functional" "$tools/run-unit-tests.sh" "$tmp/ext-no-functional"
 check "run-unit-tests.sh with two directories exits 2" \
   exits_with 2 "$tools/run-unit-tests.sh" "$tmp/ext-no-phpunit" "$tmp/ext-bad-name"
 check "run-unit-tests.sh rejects a composer name that is not vendor/name" \

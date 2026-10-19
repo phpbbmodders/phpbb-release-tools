@@ -30,8 +30,9 @@ phpbb-extensions test framework does in CI. The checkout is set up on first
 use; the extension is copied in afresh on every run.
 
 Arguments:
-  EXT_DIR                the extension's checkout (with composer.json and
-                         phpunit.xml.dist)
+  EXT_DIR                the extension's checkout (with composer.json,
+                         phpunit.xml.dist and a tests/functional folder,
+                         which may be empty)
   PHPUNIT_ARGS           anything after -- is passed to PHPUnit
 
 Options:
@@ -128,6 +129,11 @@ esac
 ext_dir="$(cd -- "$ext_dir" && pwd)"
 [ -f "$ext_dir/composer.json" ] || usage_error "$ext_dir has no composer.json"
 [ -f "$ext_dir/phpunit.xml.dist" ] || usage_error "$ext_dir has no phpunit.xml.dist"
+# The test framework's CI runs with phpBB's own configuration, which lists the
+# extension's tests/functional folder; its PostgreSQL, MySQL, MSSQL and Windows
+# jobs stop when the folder is missing, even with functional tests turned off
+[ -d "$ext_dir/tests/functional" ] ||
+  usage_error "$ext_dir has no tests/functional folder, which the test framework's CI jobs need even when empty: mkdir -p tests/functional && touch tests/functional/.gitkeep"
 
 for tool in git php composer rsync jq; do
   need "$tool"
