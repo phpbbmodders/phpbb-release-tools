@@ -50,7 +50,7 @@ class Shooter:
         self.out_dir = out_dir
         self.saved: list = []
         self.failed: list = []
-        self.cleanup: list = []  # paths to delete once the screenshots are taken
+        self.cleanup: list = []  # files and folders to delete once the screenshots are taken
         self._admin_sid = ""
         self._admin_cookies: list = []
         self._admin_agent = ""
@@ -862,6 +862,10 @@ NEWSPAGE_NEWS = [
     ("Scheduled maintenance this weekend",
      "The board will be read-only for about an hour on Saturday morning while we move to a new server. "
      "Posts made just before the move are kept."),
+    ("Photos from the spring walk",
+     "[img]{IMAGE}[/img]\n\nThanks to everyone who came along on the spring walk. We had clear skies all day, "
+     "and twelve members made it to the top of the hill.\n\nPost your own photos in the members' area, and "
+     "let us know where we should go next time."),
 ]
 
 NEWSPAGE_SEED = r"""
@@ -869,6 +873,16 @@ require_once $phpbb_root_path . 'includes/functions_posting.php';
 require_once $phpbb_root_path . 'includes/functions_admin.php';
 // the install's welcome topic is in the same forum; the news page shows only the example news
 delete_topics('forum_id', [2]);
+// a picture for the last news item, drawn here so no image file has to ship with the tool
+$w = 1200; $h = 500;
+$img = imagecreatetruecolor($w, $h);
+for ($y = 0; $y < $h; $y++) {
+    imageline($img, 0, $y, $w, $y, imagecolorallocate($img, 40 + (int) (60 * $y / $h), 110 + (int) (60 * $y / $h), 170 + (int) (40 * $y / $h)));
+}
+imagefilledellipse($img, 910, 150, 180, 180, imagecolorallocate($img, 250, 210, 120));
+imagefilledpolygon($img, [0, 500, 300, 250, 560, 500], imagecolorallocate($img, 40, 90, 70));
+imagefilledpolygon($img, [380, 500, 760, 200, 1200, 500], imagecolorallocate($img, 60, 120, 90));
+imagepng($img, $phpbb_root_path . 'images/newspage-example.png');
 $news = json_decode(%s, true);
 $keep = $user->data;
 $user->data = array_merge($keep, ['user_id' => 2, 'username' => 'admin', 'user_ip' => '127.0.0.1',
@@ -898,30 +912,34 @@ echo "\nNEWS-TOPICS:" . json_encode($ids) . "\n";
 def shots_newspage(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/newspage: the news page, one news item and the ACP settings.
 
-    Replaces the install's welcome topic in the board's first forum with three
-    news topics and makes it the news forum. Poster information and the post
-    buttons are turned off, so the news text stands out; the other settings
-    stay at their defaults. Three more shots of the news page show it with
-    poster information and post buttons on (as the admin, who sees every
-    button), with the news shortened to 120 characters, and without the
-    forum and date filters.
+    Replaces the install's welcome topic in the board's first forum with four
+    news topics, the last one opening with a picture, and makes it the news
+    forum. The main shots show the news with the first image above the text and
+    without poster information or post buttons. More shots of the news page
+    show it with poster information and post buttons on (as the admin, who
+    sees every button), shortened to 120 characters without the lead image,
+    filtered by forum, and without the filters.
     """
-    out = board.php(NEWSPAGE_SEED % php_string(json.dumps(NEWSPAGE_NEWS)), check=True)
+    # The picture is served by the screenshot server, so the BBCode needs its address
+    news = [(subject, text.replace("{IMAGE}", f"{board.base}/images/newspage-example.png")) for subject, text in NEWSPAGE_NEWS]
+    out = board.php(NEWSPAGE_SEED % php_string(json.dumps(news)), check=True)
+    shoot.cleanup.append(board.root / "images" / "newspage-example.png")
     topics = json.loads(out.split("NEWS-TOPICS:")[1].split()[0])
-    set_config(board, {"news_forums": "2", "news_user_info": "0", "news_post_buttons": "0"})
+    set_config(board, {"news_forums": "2", "news_user_info": "0", "news_post_buttons": "0", "news_lead_image": "1"})
 
     shoot.shot("newspage-news", "app.php/news")
-    shoot.shot("newspage-single", f"app.php/news/{topics[0]}")
+    shoot.shot("newspage-single", f"app.php/news/{topics[-1]}?sid={{sid}}", admin=True)
     shoot.shot("newspage-acp-settings", "adm/index.php?i=-phpbbmodders-newspage-acp-main_module&mode=settings&sid={sid}",
                admin=True, full_page=True)
     shoot.shot("newspage-news-phone", "app.php/news", phone=True)
+    shoot.shot("newspage-news-filtered", "app.php/news/category/2")
 
     # The same page with other settings, one change at a time
     set_config(board, {"news_user_info": "1", "news_post_buttons": "1"})
     shoot.shot("newspage-news-full", "app.php/news?sid={sid}", admin=True)
-    set_config(board, {"news_user_info": "0", "news_post_buttons": "0", "news_char_limit": "120"})
+    set_config(board, {"news_user_info": "0", "news_post_buttons": "0", "news_char_limit": "120", "news_lead_image": "0"})
     shoot.shot("newspage-news-shortened", "app.php/news")
-    set_config(board, {"news_char_limit": "500", "news_cat_show": "0", "news_archive_show": "0"})
+    set_config(board, {"news_char_limit": "500", "news_lead_image": "1", "news_cat_show": "0", "news_archive_show": "0"})
     shoot.shot("newspage-news-no-filters", "app.php/news")
 
 
@@ -1022,7 +1040,10 @@ def main() -> int:
             finally:
                 browser.close()
                 for path in shooter.cleanup:
-                    shutil.rmtree(path, ignore_errors=True)
+                    if Path(path).is_dir():
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        Path(path).unlink(missing_ok=True)
         errors = board.php_errors()
         if errors:
             print(f"  [FAIL] PHP errors logged: {errors[0][:200]}")
