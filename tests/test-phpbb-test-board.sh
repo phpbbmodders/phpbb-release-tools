@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 # Option-handling tests for the phpbb-test-board tools: help output, exit
 # status for bad arguments, and the error for a missing board. Does not build
-# a board or contact phpBB, and run-unit-tests.sh is only given bad arguments;
+# a board or contact phpBB, and run-unit-tests.sh and php-lint.sh are only given bad arguments;
 # the Python scripts' first run creates their virtualenv
 # (phpbb-test-board/.venv), which needs network access once.
 # Usage: tests/test-phpbb-test-board.sh
@@ -141,6 +141,17 @@ check "run-unit-tests.sh with two directories exits 2" \
   exits_with 2 "$tools/run-unit-tests.sh" "$tmp/ext-no-phpunit" "$tmp/ext-bad-name"
 check "run-unit-tests.sh rejects a composer name that is not vendor/name" \
   output_has "composer.json has no valid vendor/name" "$tools/run-unit-tests.sh" -e "$tmp/no-env" "$tmp/ext-bad-name"
+
+# php-lint.sh: option handling only; every case exits before Docker is used
+check "php-lint.sh without arguments shows help and exits 0" exits_with 0 "$tools/php-lint.sh"
+check "php-lint.sh --help shows usage" output_has "Usage: php-lint.sh" "$tools/php-lint.sh" --help
+check "php-lint.sh with an unknown option exits 2" exits_with 2 "$tools/php-lint.sh" --nope "$tmp"
+check "php-lint.sh with a missing directory exits 2" exits_with 2 "$tools/php-lint.sh" "$tmp/no-such-dir"
+check "php-lint.sh with two directories exits 2" exits_with 2 "$tools/php-lint.sh" "$tmp" "$tmp"
+check "php-lint.sh with --php and no value exits 2" exits_with 2 "$tools/php-lint.sh" "$tmp" --php
+check "php-lint.sh rejects a version that is not MAJOR.MINOR" \
+  output_has "bad PHP version: '7'" "$tools/php-lint.sh" -p 7 "$tmp"
+check "php-lint.sh rejects an image-like version" exits_with 2 "$tools/php-lint.sh" -p "7.4-cli;id" "$tmp"
 
 if [ "$failures" -eq 0 ]; then
   echo "All tests passed."
