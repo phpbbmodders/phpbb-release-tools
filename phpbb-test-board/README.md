@@ -115,6 +115,8 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/copylinks` clicks a topic title, a post subject and an FAQ question and shows each one's icon turned into a tick, with the copy to the clipboard stubbed, since headless Chromium may not write to it. It also saves the ACP settings. Use `--seed` with seed-forum's standard fixtures for a topic with replies.
 
+`phpbbmodders/topicclaim` needs `--seed` with seed-forum's standard fixtures, for its `forum_moderator` user. That user claims the busiest topic with a note, and the admin claims another topic in the same forum. Claims show only to moderators, so every shot is taken as the admin: the forum's topic list, the claim notice on the topic page, the claim page (with take over, transfer and release), MCP → Claimed topics and the ACP settings.
+
 For example, ProMinoDeux's screenshots:
 
 ```bash

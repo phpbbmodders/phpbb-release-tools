@@ -1019,6 +1019,45 @@ def shots_feedlinks(board: Board, shoot: Shooter, args: argparse.Namespace) -> N
                admin=True, selector='fieldset:has(input[name="config[feedlinks_rss_head]"])')
 
 
+def shots_topicclaim(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/topicclaim: claim marks in a topic list, the topic page notice, the claim page,
+    MCP → Claimed topics and the ACP settings.
+
+    Needs a board with forums and moderators: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. forum_moderator claims the busiest topic
+    with a note, and the admin claims another topic in the same forum, so the
+    lists show both "claimed by" and "claimed by you". Claims are only shown to
+    moderators, so every shot is taken as the admin, who can also take over,
+    transfer or release forum_moderator's claim.
+    """
+    _, topic = busiest_forum_and_topic(board)
+    other = board.sql("SELECT topic_id FROM phpbb_topics WHERE forum_id = (SELECT forum_id FROM phpbb_topics "
+                      "WHERE topic_id = ?) AND topic_id <> ? AND topic_status = 0 ORDER BY topic_last_post_time DESC LIMIT 1",
+                      (topic, topic))[0][0]
+    forum = board.sql("SELECT forum_id FROM phpbb_topics WHERE topic_id = ?", (topic,))[0][0]
+    moderator = board.sql("SELECT user_id FROM phpbb_users WHERE username = 'forum_moderator'")[0][0]
+    now = int(time.time())
+    board.sql("DELETE FROM phpbb_topicclaim_claims")
+    board.sql("INSERT INTO phpbb_topicclaim_claims (topic_id, user_id, claim_time, claim_note) VALUES (?, ?, ?, ?)",
+              (topic, moderator, now - 3 * 3600, "Members arguing, keep an eye on it"))
+    board.sql("INSERT INTO phpbb_topicclaim_claims (topic_id, user_id, claim_time, claim_note) VALUES (?, ?, ?, ?)",
+              (other, 2, now - 26 * 3600, ""))
+    board.purge_cache()
+
+    def first_post_only(p) -> None:
+        # Crop to the title, the claim notice and the first post
+        p.add_style_tag(content="#page-body > .post ~ *:not(.action-bar.bar-top) { display: none; }")
+    shoot.shot("topicclaim-viewforum", f"viewforum.php?f={forum}&sid={{sid}}", admin=True,
+               selector=".forumbg:not(.announcement)")
+    shoot.shot("topicclaim-viewtopic", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True,
+               selector="#page-body", prepare=first_post_only)
+    shoot.shot("topicclaim-manage", f"app.php/topicclaim/{topic}?sid={{sid}}", admin=True, selector="#page-body")
+    shoot.shot("topicclaim-mcp", "mcp.php?i=-phpbbmodders-topicclaim-mcp-main_module&mode=claims&sid={sid}",
+               admin=True, selector="#page-body")
+    shoot.shot("topicclaim-acp-settings", "adm/index.php?i=-phpbbmodders-topicclaim-acp-main_module&mode=settings&sid={sid}",
+               admin=True)
+
+
 SHOTS = {
     "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/copylinks": shots_copylinks,
@@ -1028,6 +1067,7 @@ SHOTS = {
     "phpbbmodders/newspage": shots_newspage,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
+    "phpbbmodders/topicclaim": shots_topicclaim,
     "phpbbmodders/wiki": shots_wiki,
     "ProMinoDeux": shots_prominodeux,
 }
