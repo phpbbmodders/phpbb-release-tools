@@ -943,6 +943,52 @@ def shots_newspage(board: Board, shoot: Shooter, args: argparse.Namespace) -> No
     shoot.shot("newspage-news-no-filters", "app.php/news")
 
 
+def show_copied(selector: str) -> Callable:
+    """A prepare() step for phpbbmodders/copylinks: click SELECTOR and wait for its tick.
+
+    Headless Chromium has no clipboard permission, so the copy is stubbed to
+    succeed. The heading's icon turns into a tick for two seconds; the shot is
+    taken inside that.
+    """
+    def prepare(p) -> None:
+        p.evaluate("Object.defineProperty(navigator, 'clipboard', "
+                   "{value: {writeText: () => Promise.resolve()}, configurable: true})")
+        p.locator(selector).first.click()
+        # No hover or focus underline on the heading
+        p.mouse.move(0, 0)
+        p.evaluate("document.activeElement.blur()")
+        p.wait_for_selector(".copylinks-copied")
+        p.wait_for_timeout(400)  # without the icon, the text tick fades in over 0.2s
+    return prepare
+
+
+def shots_copylinks(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/copylinks: the tick after copying a topic title, a post subject and an FAQ question,
+    and the ACP settings.
+
+    The headings show the extension's default icon, which turns into a tick
+    after a copy. Use --seed with seed-forum's bin/seed-standard-fixtures.php for a topic
+    with replies. The post shot is the topic's second post, so its subject
+    differs from the title.
+    """
+    forum, topic = busiest_forum_and_topic(board)
+    post = board.sql("SELECT post_id FROM phpbb_posts WHERE topic_id = ? "
+                     "ORDER BY post_time, post_id LIMIT 1 OFFSET 1", (topic,))[0][0]
+    shoot.shot("copylinks-topic", f"viewtopic.php?t={topic}", prepare=show_copied("h2.topic-title > a"))
+    shoot.shot("copylinks-post", f"viewtopic.php?t={topic}", selector=f"#p{post}",
+               prepare=show_copied(f"#p{post} h3 > a"))
+    copy_question = show_copied("dl.faq > dt > a")
+
+    def first_question_only(p) -> None:
+        # Crop to the question's section, keeping only that first question
+        copy_question(p)
+        p.add_style_tag(content=".panel:has(.copylinks-copied) dl.faq ~ * { display: none; }")
+    shoot.shot("copylinks-faq", "app.php/help/faq", selector=".panel:has(.copylinks-copied)",
+               prepare=first_question_only)
+    shoot.shot("copylinks-acp-settings", "adm/index.php?i=-phpbbmodders-copylinks-acp-main_module&mode=settings&sid={sid}",
+               admin=True)
+
+
 FEEDLINKS_FORUMS = {
     # Forum name from seed-forum's standard fixtures: 1 Atom, 2 RSS, 3 both
     "General Discussion": 3,
@@ -975,6 +1021,7 @@ def shots_feedlinks(board: Board, shoot: Shooter, args: argparse.Namespace) -> N
 
 SHOTS = {
     "phpbbmodders/contactadmin": shots_contactadmin,
+    "phpbbmodders/copylinks": shots_copylinks,
     "phpbbmodders/documentation": shots_documentation,
     "phpbbmodders/feedlinks": shots_feedlinks,
     "phpbbmodders/knowledgebase": shots_knowledgebase,
