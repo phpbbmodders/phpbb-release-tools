@@ -125,6 +125,15 @@ test_extensions_short_create() {
   "$root/git-extensions.sh" -C >/dev/null && zip_is_valid
 }
 
+
+test_extensions_symlink_and_output() {
+  new_repo
+  mkdir -p "$tmp/bin"
+  ln -sf "$root/git-extensions.sh" "$tmp/bin/git-extensions.sh"
+  "$tmp/bin/git-extensions.sh" --create --output custom >/dev/null \
+    && unzip -tq "$tmp/work/custom/acme-myext-1.2.3.zip" >/dev/null
+}
+
 # Create a fresh style repository in $tmp/style with one commit.
 new_style_repo() {
   rm -rf "$tmp/style" "$tmp/git-exported"
@@ -154,7 +163,7 @@ test_style_usage_errors_exit_2() {
 }
 
 test_langpack_usage_errors_exit_2() {
-  [[ "$(exit_status "$root/git-release-langpack.sh" --release)" == 2 ]] \
+  [[ "$(exit_status "$root/git-release-langpack.sh" --release --create)" == 2 ]] \
     && [[ "$(exit_status "$root/git-release-langpack.sh" --create --dry-run)" == 2 ]] \
     && [[ "$(exit_status "$root/git-release-langpack.sh" --create --gh-release)" == 2 ]]
 }
@@ -185,12 +194,20 @@ check "git-extensions.sh: fails outside a git repository" test_outside_repositor
 check "git-extensions.sh: no arguments prints help and builds nothing" test_extensions_no_arguments_prints_help
 check "git-extensions.sh: usage errors exit 2 and build nothing" test_extensions_usage_errors_exit_2
 check "git-extensions.sh: -C is short for --create" test_extensions_short_create
+check "git-extensions.sh: symlink finds shared helpers and respects relative output" test_extensions_symlink_and_output
 check "git-release-style.sh: --create builds a valid zip with the style folder" test_style_create
 check "git-release-style.sh: no arguments prints help; usage errors exit 2" test_style_usage_errors_exit_2
-check "git-release-langpack.sh: --release (renamed), --dry-run without --gh-release, and two modes exit 2" test_langpack_usage_errors_exit_2
+check "git-release-langpack.sh: conflicting modes and --dry-run without --release exit 2" test_langpack_usage_errors_exit_2
 check "git-release-langpack.sh: no arguments prints help" test_langpack_no_arguments_prints_help
 check "git-release-langpack.sh: unknown option exits 2" test_langpack_unknown_option_exits_2
 check "git-release-langpack.sh: an operation is required" test_langpack_needs_an_operation
+
+for script in git-extensions.sh git-release-style.sh git-release-langpack.sh; do
+  check "$script: --force requires publication" test -n "$("$root/$script" --create --force 2>&1 | grep 'Error: --force requires --release')"
+  check "$script: --repo requires remote source" test "$(exit_status "$root/$script" --create --repo acme/ext)" = 2
+  check "$script: missing output argument is rejected" test "$(exit_status "$root/$script" --create --output)" = 2
+  check "$script: missing repo argument is rejected" test "$(exit_status "$root/$script" --create --remote --repo)" = 2
+done
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures test(s) failed."

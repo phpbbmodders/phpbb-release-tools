@@ -8,7 +8,6 @@ body:
       label: Script
       options:
         - git-extensions.sh
-        - git-release-api.sh
         - git-release-style.sh
         - git-release-langpack.sh
         - phpbb-test-board

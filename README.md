@@ -9,11 +9,12 @@ Tools for phpBB packages: Bash scripts that build release ZIPs and publish them 
 | [`git-extensions.sh`](git-extensions.sh) | A phpBB extension | `<vendor>-<name>-<version>.zip`, from `composer.json` |
 | [`git-release-style.sh`](git-release-style.sh) | A phpBB style | `<Stylename>_<version>.zip`, from `style.cfg` |
 | [`git-release-langpack.sh`](git-release-langpack.sh) | A phpBB language pack for the phpBB.com Customisation Database | `<languagename>_<version>.zip` |
-| [`git-release-api.sh`](git-release-api.sh) | A phpBB extension and a GitHub Release from the remote default branch | `<vendor>-<name>-<version>.zip`, from committed `composer.json` |
 
-`git-extensions.sh`, `git-release-style.sh` and `git-release-langpack.sh` build from the current git commit (`HEAD`); `git-release-api.sh` builds from the repository's default branch on GitHub (`main`, `master`, or whatever it is set to). Uncommitted changes are not included. Files marked `export-ignore` in `.gitattributes` are left out. They were written and tested on Linux.
+All three scripts build from the current Git commit (`HEAD`) by default. Add `--remote` to use the repository's default branch on GitHub (`main`, `master`, or its configured name). Uncommitted changes are not included. Files marked `export-ignore` in `.gitattributes` are left out. They were written and tested on Linux.
 
-The scripts share their GitHub release code in [`lib/github-release.sh`](lib/github-release.sh). To put a script on your `PATH`, symlink it rather than copying it, so it can still find `lib/`.
+The scripts share source selection in [`lib/release-source.sh`](lib/release-source.sh) and GitHub publishing in [`lib/github-release.sh`](lib/github-release.sh). To put a script on your `PATH`, symlink it rather than copying it, so it can still find `lib/`.
+
+See the [Wiki release workflows](https://github.com/phpbbmodders/phpbb-release-tools/wiki/Release-workflows) for per-package examples and recovery guidance.
 
 ## Forum update posts
 
@@ -26,29 +27,36 @@ for the required layout, image links, sizing, and preparation checks.
 - `git-extensions.sh`: `git`, `jq`, `zip`
 - `git-release-style.sh`: `git`, `zip`
 - `git-release-langpack.sh`: `git`, `curl`, `jq`, `unzip`, `zip`. For `--check` also `php`, `composer` and `sha256sum`.
-- `git-release-api.sh`: `git`, `jq`, `zip`, and GNU coreutils (`timeout`, `mktemp`, `stat`).
-- `--gh-release` and `git-release-api.sh` also need an authenticated GitHub CLI (`gh`), `jq` and `timeout`, with permission to create releases and upload assets.
+- `--remote` and `--release` also need an authenticated GitHub CLI (`gh`), `jq` and `timeout`. Publishing also uses GNU `stat` and needs permission to create releases and upload assets.
 - `phpbb-test-board/`: see [its README](phpbb-test-board/README.md#requirements).
 - `pr-wait.py`: Python 3.7 or later and an authenticated GitHub CLI (`gh`).
 
 ## Usage
 
-`git-extensions.sh`, `git-release-style.sh` and `git-release-langpack.sh` share the same modes. Run them inside the package's git repository. With no arguments they print help.
+The three scripts share the same command structure. Run them inside the package's Git repository, or use `--remote --repo OWNER/REPO` from elsewhere. With no arguments they print help.
 
 ```bash
-git-extensions.sh --create                  # build the ZIP in ../git-exported
-git-extensions.sh --gh-release --dry-run    # build it and preview the GitHub release
-git-extensions.sh --gh-release              # build it and publish a GitHub release
+git-extensions.sh --create                         # ZIP from local HEAD
+git-extensions.sh --create --remote                # ZIP from GitHub's default branch
+git-extensions.sh --release --remote --dry-run     # ZIP and release preview
+git-extensions.sh --release --remote               # publish to GitHub Releases
+git-extensions.sh --release --remote --force       # replace an existing tag/release ZIP
 ```
+
+Use `git-release-style.sh` or `git-release-langpack.sh` for those package types.
 
 | Option | Meaning |
 |---|---|
-| `-C`, `--create` | Build the ZIP in `../git-exported`, next to the repository. |
-| `-g`, `--gh-release` | Build the ZIP and publish it as a GitHub Release from `HEAD`. Tracked files must be committed and `HEAD` pushed. |
-| `-n`, `--dry-run` | With `--gh-release`: preview the release and its generated notes without changing anything on GitHub. |
+| `-C`, `--create` | Build a ZIP only. |
+| `-r`, `--release` | Build a ZIP and publish it to GitHub Releases. Local publication requires clean tracked files and an already-pushed `HEAD`. |
+| `--remote` | Pin and package GitHub's default-branch commit instead of local `HEAD`. |
+| `-n`, `--dry-run` | With `--release`, build the ZIP and preview generated notes without changing a GitHub tag, release, or asset. A same-named local ZIP can be replaced. |
+| `-f`, `--force` | With `--release`, permit replacement of an existing version's tag, notes, and ZIP. GitHub-enforced immutability and tag rules still apply. |
+| `-R`, `--repo OWNER/REPO` | Select the repository for `--remote`; otherwise infer it from the current checkout. Rejected without `--remote`. |
+| `-o`, `--output DIR` | ZIP destination, defaulting to `../git-exported` relative to the repository root (or current directory when outside a checkout). Relative custom paths use that same root. |
 | `-h`, `--help` | Show help. |
 
-Invalid usage exits with status 2.
+Existing `-g`/`--gh-release` remains an alias for `--release`, and `--output-dir` remains an alias for `--output`. Language packs now use `--release` for GitHub publication too; use `--create` for a ZIP only. Invalid usage exits with status 2.
 
 ### Extensions: `git-extensions.sh`
 
@@ -64,35 +72,35 @@ Invalid usage exits with status 2.
 git-release-langpack.sh --create --check
 ```
 
-- `--check` (`-c`) runs the [phpBB Translation Validator](https://github.com/phpbb/phpbb-translation-validator) (branch `1.6.x`, phpBB 3.3 only) on the exact zip contents. It uses the English files of the official phpBB release zip as the reference, checked against phpBB's published SHA-256. It can run on its own, or with `--create` or `--gh-release`; then nothing is written or published unless validation passes.
+- `--check` (`-c`) runs the [phpBB Translation Validator](https://github.com/phpbb/phpbb-translation-validator) (branch `1.6.x`, phpBB 3.3 only) on the exact zip contents. It uses the English files of the official phpBB release zip as the reference, checked against phpBB's published SHA-256. It can run on its own, or with `--create` or `--release`; then nothing is written or published unless validation passes.
 - The zip is `<languagename>_<version>.zip` with a folder of the same name inside. Only `ext/`, `language/` and `styles/` are included, because the [Language Pack Validation Policy](https://area51.phpbb.com/docs/dev/3.3.x/language/validation.html) does not allow other files.
-- The version defaults to the current stable phpBB 3.3 release from `https://version.phpbb.com/phpbb/versions.json`. Use `--version` to set it, for example `--version 3.3.16`. With `--gh-release` that phpBB version is the tag and release name.
-- `--release` was renamed to `--create`.
+- The version defaults to the current stable phpBB 3.3 release from `https://version.phpbb.com/phpbb/versions.json`. Use `--version` to set it, for example `--version 3.3.16`. With `--release` that phpBB version is the tag and release name.
 
 Run `git-release-langpack.sh --help` for all options.
 
-### GitHub releases from the default branch: `git-release-api.sh`
+### Remote sources
 
-Uses the GitHub API to resolve the latest commit on the repository's default branch, generate release notes, create a draft release, upload the package, and publish the release. An isolated Git fetch supplies that exact commit for `git archive`, preserving the extension folder layout and exclusions. The local checkout is not changed, so nothing needs to be checked out or pushed locally.
-
-Run from the extension repository, or supply `--repo OWNER/REPO`:
+`--remote` resolves GitHub's configured default branch and fetches its exact commit into an isolated temporary Git repository. Metadata, validation, and packaging all use that pinned commit. Your local branch and working files are preserved, including dirty or unpushed local changes. ZIP-only `--create --remote` does not inspect existing releases or generate release notes.
 
 ```bash
-git-release-api.sh --dry-run --repo phpbbmodders/phpbb-ext-wiki
-git-release-api.sh --release --repo phpbbmodders/phpbb-ext-wiki
+git-extensions.sh --release --remote --dry-run --repo phpbbmodders/phpbb-ext-wiki
+git-release-style.sh --create --remote --repo OWNER/STYLE --output /tmp/style-packages
+git-release-langpack.sh --create --remote --repo OWNER/LANGUAGE --check --version 3.3.17
 ```
 
-`--dry-run` builds the local ZIP and previews GitHub-generated release notes without creating a tag, release, or asset. `--release` publishes it. With no arguments the script prints help. Use `--output DIR` to change the ZIP destination from `../git-exported`. Packaging replaces a same-named local ZIP only after the archive is complete.
+The old `git-release-api.sh` entry point has been removed. Replace `git-release-api.sh --dry-run` with `git-extensions.sh --release --remote --dry-run`, and replace its `--release` operation with `git-extensions.sh --release --remote`. The `--repo` and `--output` options carry over. Update any personal aliases or automation still calling the old entry point.
 
 ### How GitHub releases behave
 
-These rules apply to `--gh-release` and to `git-release-api.sh`.
+These rules apply to `--release` (including its `--gh-release` alias) in all three scripts.
 
-The package version is the tag and release name, and release notes are generated by GitHub. Alpha, beta, RC, and dev versions are marked as prereleases. Archived repositories are rejected, since GitHub does not allow releases on them. For stable, alpha, beta, and RC versions an existing tag or release stops the operation; those releases and assets are never replaced.
+The package version is the tag and release name, and release notes are generated by GitHub. Alpha, beta, RC, and dev versions are marked as prereleases. Archived repositories are rejected, since GitHub does not allow releases on them. For stable, alpha, beta, and RC versions an existing tag or release stops the operation unless `--force` is explicitly supplied.
 
 A version ending in `-dev` is a rolling prerelease, including a build on the way to an alpha, beta or RC such as `1.1.0-a2-dev`. The first release creates it like any other release. Each later release moves the tag to the new commit, regenerates the release notes, and replaces the ZIP in the same GitHub release, so its URL stays the same. The new ZIP is uploaded under a temporary name and only replaces the old one after the upload is confirmed. The scripts print `Updated rolling release:` for this path and `Published release:` for a new release. A dry run shows what would change but never touches the tag, release, or asset. If the tag has to move, the dry-run notes still reflect where the tag points now.
 
-The tag is reserved at the pinned commit before the release is created. A failure after tag creation may leave that tag without a release. The release stays a draft until its asset upload is confirmed. If uploading or publishing fails, the script reports the release URL and exits with an error. Inspect the remote state before retrying. For stable, alpha, beta, and RC versions a retry stops when it finds the existing tag or release. For a `-dev` version a retry reuses the leftover tag or draft release and finishes the update. A publication timeout may mean publication succeeded but could not be confirmed. Requests have finite timeouts and remote write requests are not retried automatically.
+`--force` updates an existing release in place, preserving its URL, and moves its tag to the selected commit. Stable versions remain stable; alpha/beta/RC versions remain prereleases. It also handles a tag without a release or a release whose tag is missing. ZIP replacement uses the same staging/upload verification as rolling releases, and unrelated assets are preserved. A forced dry run only previews those changes. The flag does not bypass GitHub's tag protections or immutable-release policy.
+
+The tag is reserved at the pinned commit before the release is created. A failure after tag creation may leave that tag without a release. The release stays a draft until its asset upload is confirmed. If uploading or publishing fails, the script reports the release URL and exits with an error. Inspect the remote state before retrying. For stable, alpha, beta, and RC versions a retry stops when it finds the existing tag or release unless `--force` is supplied. For a `-dev` version a retry reuses the leftover tag or draft release and finishes the update. A publication timeout may mean publication succeeded but could not be confirmed. Requests have finite timeouts and remote write requests are not retried automatically.
 
 ### Waiting for a pull request's checks: `pr-wait.py`
 
@@ -149,6 +157,7 @@ Contributions are welcome!
 ## Acknowledgments
 
 - Code review, bug fixes, and documentation assisted by [Claude](https://www.anthropic.com/claude).
+- Release-script consolidation, regression tests, and documentation assisted by [Codex](https://openai.com/codex/).
 
 ## License
 
