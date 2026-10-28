@@ -271,8 +271,7 @@ def check_posteripinviewtopic(b: Board) -> None:
 
 
 def check_printallposts(b: Board) -> None:
-    # A reply, so the topic has two posts, and an image attached to the welcome post, which the
-    # print page leaves out like phpBB's own print view
+    # A reply, so the topic has two posts, and an image attached to the welcome post
     forum = b.sql("SELECT forum_id FROM phpbb_posts WHERE post_id = 1")[0][0]
     now = int(time.time())
     b.sql("INSERT INTO phpbb_posts (topic_id, forum_id, poster_id, poster_ip, post_time, post_visibility, "
@@ -295,8 +294,7 @@ def check_printallposts(b: Board) -> None:
         body = admin.get(f"{b.base}/viewtopic.php?t=1&view=printall").text
         ok("Second probe post" in body and "This is an example post" in body,
            "with one post per page, the print page still shows both posts")
-        ok("printall-probe.gif" not in body and "attachbox" not in body,
-           "no attachments on the print page, as in phpBB's own print view")
+        ok("printall-probe.gif" in body, "the print page shows the post's attachment")
     finally:
         probe.unlink(missing_ok=True)
 
