@@ -1,46 +1,20 @@
 #!/usr/bin/bash
-# git-extensions.sh
-#
-# Build a phpBB extension release archive from the current Git commit and,
-# optionally, publish it as a GitHub Release.
-#
-# Usage:
-#   git-extensions.sh --create
-#   git-extensions.sh --gh-release
-#   git-extensions.sh --gh-release --dry-run
-#   git-extensions.sh --help
-#
-# The archive is created from HEAD, so uncommitted changes are not included.
-# Files marked export-ignore in .gitattributes are excluded. It can be run from
-# anywhere inside the repository.
-#
-# The "name" (vendor/name) and "version" in the committed composer.json name
-# the ZIP, and the version is the tag and release name. Alpha, beta, RC, and dev
-# versions are published as prereleases. A version ending in -dev is a rolling
-# prerelease: each --gh-release moves its tag to HEAD, regenerates its notes,
-# and replaces its ZIP in the same release. Other versions are immutable, so an
-# existing tag or release is an error. HEAD must already be pushed to GitHub.
-#
-# Output:
-#   ../git-exported/<vendor>-<name>-<version>.zip, with a <vendor>/<name>/ folder
-#
-# Requirements:
-#   --create:      git, jq, zip
-#   --gh-release:  also gh (authenticated) and timeout
-#   lib/github-release.sh next to this script (symlinking the script works).
-#
-# Exit status: 0 on success, 1 on failure, 2 on invalid usage. No ZIP is left
-# behind on failure.
+# Build a phpBB extension ZIP from local HEAD or the remote default branch.
+# --create builds locally; --release publishes to GitHub; --dry-run previews it.
+# --force permits replacing an existing tag/release, subject to GitHub policy.
+# Requires the adjacent lib/ helpers; symlinking this entry point is supported.
+# Use --help for package-specific options and requirements in README.md.
+# Exit status: 0 success, 1 operational failure, 2 invalid usage.
 
 set -Eeuo pipefail
-
-readonly GIT_EXPORT_DIR="../git-exported"
 
 # Shared release logic lives next to the real script, even when it is run through a symlink.
 SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
 readonly SCRIPT_DIR
 # shellcheck source=lib/github-release.sh
 source "$SCRIPT_DIR/lib/github-release.sh"
+# shellcheck source=lib/release-source.sh
+source "$SCRIPT_DIR/lib/release-source.sh"
 
 MODE=""
 DRY_RUN=false
@@ -72,33 +46,12 @@ cleanup() {
 }
 
 usage() {
-  cat <<'EOF'
-Usage:
-  git-extensions.sh --create
-  git-extensions.sh --gh-release
-  git-extensions.sh --gh-release --dry-run
-  git-extensions.sh --help
+  release_usage 'git-extensions.sh'
+  cat <<'HELP'
 
-Options:
-  -C, --create       Create the release ZIP locally.
-  -g, --gh-release   Create the ZIP and publish it as a GitHub Release.
-  -n, --dry-run      With --gh-release, validate and show what would be
-                     published without making changes on GitHub.
-  -h, --help         Show this help.
-
-The version in composer.json is the tag and release name. Alpha, beta, RC,
-and dev versions are prereleases. A -dev version is a rolling prerelease: each
---gh-release moves its tag to HEAD and replaces its notes and ZIP in the same
-release. Any other existing tag or release is an error.
-
-To publish the remote default branch instead of local HEAD, use
-git-release-api.sh.
-
-Examples:
-  git-extensions.sh --create
-  git-extensions.sh --gh-release
-  git-extensions.sh --gh-release --dry-run
-EOF
+The name (vendor/name) and version in composer.json name the ZIP and tag.
+The ZIP contains vendor/name/. Files marked export-ignore are excluded.
+HELP
 }
 
 require_commands() {
@@ -117,13 +70,26 @@ parse_args() {
   while (($#)); do
     case "$1" in
       -C|--create)
-        [[ -z "$MODE" ]] || usage_error "only one of --create or --gh-release may be used"
+        [[ -z "$MODE" ]] || usage_error "only one of --create or --release may be used"
         MODE="create"
         ;;
-      -g|--gh-release)
-        [[ -z "$MODE" ]] || usage_error "only one of --create or --gh-release may be used"
+      -r|--release|-g|--gh-release)
+        [[ -z "$MODE" ]] || usage_error "only one of --create or --release may be used"
         MODE="gh-release"
         ;;
+      --remote) RELEASE_REMOTE=true ;;
+      -R|--repo)
+        release_option_value "$@"
+        RELEASE_REPO="$2"
+        shift
+        ;;
+      -o|--output|--output-dir)
+        release_option_value "$@"
+        RELEASE_OUTPUT="$2"
+        shift
+        ;;
+      -f|--force) GHR_FORCE=true ;;
+
       -n|--dry-run)
         DRY_RUN=true
         ;;
@@ -138,35 +104,22 @@ parse_args() {
     shift
   done
 
-  [[ -n "$MODE" ]] || usage_error "one of --create or --gh-release is required"
+  [[ -n "$MODE" ]] || usage_error "one of --create or --release is required"
   if [[ "$DRY_RUN" == true && "$MODE" != "gh-release" ]]; then
-    usage_error "--dry-run requires --gh-release"
+    usage_error "--dry-run requires --release"
   fi
 }
 
 # Work from the repository root, so the script also works from a subdirectory.
 prepare_repository() {
-  local repo_root
-  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
-    || die "the current directory is not inside a git repository"
-  cd "$repo_root"
-
-  # Archive the commit itself; this also works on a detached HEAD and on branch names containing "/".
-  git rev-parse --verify -q HEAD >/dev/null || die "the repository has no commits"
-  COMMIT_HASH="$(git rev-parse HEAD)"
-
-  if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-    if [[ "$MODE" == "gh-release" ]]; then
-      die "tracked files contain uncommitted changes"
-    fi
-    echo "Warning: uncommitted tracked changes are not included; only HEAD is packaged." >&2
-  fi
+  release_prepare_source "$MODE"
+  COMMIT_HASH="$RELEASE_COMMIT"
 }
 
 # Read vendor, name, and version from the committed composer.json (the same commit that is archived).
 read_composer_metadata() {
   local composer_json package
-  composer_json="$(git show HEAD:composer.json 2>/dev/null)" \
+  composer_json="$(git show "$COMMIT_HASH":composer.json 2>/dev/null)" \
     || die "composer.json is not committed in the current commit"
   package="$(jq -r '.name // empty' <<<"$composer_json")"
   VERSION="$(jq -r '.version // empty' <<<"$composer_json")"
@@ -185,13 +138,13 @@ create_archive() {
   local filename output_dir
   filename="$VENDOR-$RELEASE_NAME-$VERSION.zip"
 
-  mkdir -p "$GIT_EXPORT_DIR" || die "failed to create $GIT_EXPORT_DIR"
-  output_dir="$(cd "$GIT_EXPORT_DIR" && pwd)" || die "failed to resolve $GIT_EXPORT_DIR"
+  mkdir -p "$RELEASE_OUTPUT" || die "failed to create $RELEASE_OUTPUT"
+  output_dir="$(cd "$RELEASE_OUTPUT" && pwd)" || die "failed to resolve $RELEASE_OUTPUT"
 
   ARCHIVE="$output_dir/$filename"
   PARTIAL="$output_dir/.$filename.partial"
 
-  git archive --format=zip -9 --prefix="$VENDOR/$RELEASE_NAME/" --output="$PARTIAL" HEAD \
+  git archive --format=zip -9 --prefix="$VENDOR/$RELEASE_NAME/" --output="$PARTIAL" "$COMMIT_HASH" \
     || die "git archive failed"
 
   # git archive stores the commit hash as the ZIP archive comment.
@@ -210,9 +163,9 @@ prepare_github() {
   require_commands gh timeout
   gh auth status >/dev/null 2>&1 || die "GitHub CLI is not authenticated; run: gh auth login"
 
-  GHR_SCRATCH="$(mktemp -d)"
-  ghr_resolve_repository ""
-  ghr_require_remote_commit "$COMMIT_HASH"
+  if [[ -z "$GHR_SCRATCH" ]]; then GHR_SCRATCH="$(mktemp -d)"; fi
+  if [[ -z "$GHR_REPOSITORY" ]]; then ghr_resolve_repository ""; fi
+  if [[ "$RELEASE_REMOTE" == false ]]; then ghr_require_remote_commit "$COMMIT_HASH"; fi
   ghr_check_existing "$VERSION"
 }
 
@@ -240,9 +193,12 @@ create_github_release() {
 
 main() {
   parse_args "$@"
+  release_validate_options "$MODE"
 
   require_commands git jq zip
   trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   prepare_repository
   read_composer_metadata

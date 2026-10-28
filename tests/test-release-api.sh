@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 # Offline release workflow checks using a real Git fixture and a mocked GitHub API.
-# Covers git-release-api.sh and the --gh-release mode of the local release scripts.
+# Covers local/remote sources, publication, rolling releases, and forced replacement.
 # Usage: tests/test-release-api.sh
 set -Eeuo pipefail
 
@@ -32,6 +32,11 @@ printf '%s\n' '{"name":"acme/ext","version":"1.2.3-a2-dev"}' >"$FIXTURE_ROOT/sou
 git -C "$FIXTURE_ROOT/source" -c user.name='William Jacoby' -c user.email=bonelifer@gmail.com commit -qam alpha-dev
 ALPHA_DEV_COMMIT=$(git -C "$FIXTURE_ROOT/source" rev-parse HEAD)
 export ALPHA_DEV_COMMIT
+git -C "$FIXTURE_ROOT/source" checkout -qb stable main
+printf '%s\n' '{"name":"acme/ext","version":"1.2.3"}' >"$FIXTURE_ROOT/source/composer.json"
+git -C "$FIXTURE_ROOT/source" -c user.name=test -c user.email=test@example.com commit -qam stable
+STABLE_COMMIT=$(git -C "$FIXTURE_ROOT/source" rev-parse HEAD)
+export STABLE_COMMIT
 git -C "$FIXTURE_ROOT/source" checkout -q main
 # A dirty local version must never change the remotely committed package version.
 printf '%s\n' '{"name":"acme/ext","version":"9.9.9"}' >"$FIXTURE_ROOT/source/composer.json"
@@ -65,6 +70,49 @@ for value in "$@"; do
 done
 echo "$endpoint ${input:+with-input}" >>"$FIXTURE_ROOT/api.log"
 echo "$method $endpoint" >>"$FIXTURE_ROOT/methods.log"
+# Forced-release fixtures use a stable version unless a package case overrides it.
+if [[ "${SCENARIO:-}" == force_* ]]; then
+  version="${FORCE_VERSION:-1.2.3}"
+  asset="${FORCE_ASSET:-acme-ext-$version.zip}"
+  prerelease=false
+  if [[ "$version" == *-* ]]; then prerelease=true; fi
+  case "$endpoint" in
+    'repos/acme/ext/releases?per_page=100')
+      if [[ "$SCENARIO" == force_tag_only ]]; then echo '[]'; else
+        immutable=false
+        if [[ "$SCENARIO" == force_immutable ]]; then immutable=true; fi
+        jq -n --arg version "$version" --argjson immutable "$immutable" \
+          '[{tag_name:$version,id:789,html_url:("https://github.com/acme/ext/releases/tag/"+$version),immutable:$immutable}]'
+      fi
+      exit 0 ;;
+    repos/acme/ext/git/matching-refs/tags/*)
+      if [[ "$SCENARIO" == force_release_only ]]; then echo '[]'; else
+        jq -n --arg version "$version" --arg sha "$FIXTURE_COMMIT" \
+          '[{ref:("refs/tags/"+$version),object:{type:"tag",sha:$sha}}]'
+      fi
+      exit 0 ;;
+    repos/acme/ext/git/refs/tags/*)
+      [[ "$SCENARIO" != force_tag_failure ]] || exit 1
+      [[ " $* " == *' force=true '* ]] || exit 1
+      jq -n --arg sha "${REMOTE_COMMIT:-$STABLE_COMMIT}" '{object:{sha:$sha}}'
+      exit 0 ;;
+    repos/acme/ext/releases/789)
+      if [[ -n "$input" ]]; then
+        cp "$input" "$FIXTURE_ROOT/update.json"
+        jq -n --arg version "$version" --argjson pre "$prerelease" '{tag_name:$version,prerelease:$pre}'
+      else
+        [[ "$SCENARIO" != force_publish_failure ]] || exit 1
+        jq -n --argjson pre "$prerelease" '{draft:false,prerelease:$pre}'
+      fi
+      exit 0 ;;
+    'repos/acme/ext/releases/789/assets?per_page=100')
+      jq -n --arg name "$asset" '[{id:7,name:$name},{id:8,name:($name+".new")},{id:10,name:"other-asset.zip"}]'
+      exit 0 ;;
+    repos/acme/ext/releases/assets/9)
+      jq -n --arg name "$asset" '{name:$name}'
+      exit 0 ;;
+  esac
+fi
 case "$endpoint" in
   repos/acme/ext)
     if [[ "${SCENARIO:-}" == master_branch ]]; then branch=master; else branch=main; fi
@@ -78,7 +126,9 @@ case "$endpoint" in
   repos/acme/ext/commits/main|repos/acme/ext/commits/master)
     [[ "$endpoint" == */main || "${SCENARIO:-}" == master_branch ]] || exit 1
     [[ "${SCENARIO:-}" != main_failure ]] || exit 1
-    if [[ "${SCENARIO:-}" == dev_* ]]; then sha="$DEV_COMMIT"
+    if [[ -n "${REMOTE_COMMIT:-}" ]]; then sha="$REMOTE_COMMIT"
+    elif [[ "${SCENARIO:-}" == force_* ]]; then sha="$STABLE_COMMIT"
+    elif [[ "${SCENARIO:-}" == dev_* ]]; then sha="$DEV_COMMIT"
     elif [[ "${SCENARIO:-}" == alpha_dev ]]; then sha="$ALPHA_DEV_COMMIT"
     else sha="$FIXTURE_COMMIT"; fi
     jq -n --arg sha "$sha" '{sha:$sha}' ;;
@@ -120,7 +170,7 @@ case "$endpoint" in
     cp "$input" "$FIXTURE_ROOT/create.json"
     echo '{"id":123,"html_url":"https://github.com/acme/ext/releases/tag/untagged-0123"}' ;;
   https://uploads.github.com/repos/acme/ext/releases/*/assets?name=*)
-    [[ "${SCENARIO:-}" != upload_failure ]] || exit 1
+    [[ "${SCENARIO:-}" != upload_failure && "${SCENARIO:-}" != force_upload_failure ]] || exit 1
     cp "$input" "$FIXTURE_ROOT/uploaded.zip"
     jq -n --arg name "${endpoint##*name=}" --argjson size "$(stat -c %s "$input")" '{id:9,name:$name,state:"uploaded",size:$size}' ;;
   repos/acme/ext/releases/123)
@@ -131,13 +181,17 @@ esac
 MOCK
 chmod +x "$FIXTURE_ROOT/bin/git" "$FIXTURE_ROOT/bin/gh"
 export PATH="$FIXTURE_ROOT/bin:$PATH"
-script="$root/git-release-api.sh"
+script="$root/git-extensions.sh"
 zip_file="$FIXTURE_ROOT/output/acme-ext-1.2.3-a1.zip"
 
 run() {
   : >"$FIXTURE_ROOT/api.log"
   : >"$FIXTURE_ROOT/methods.log"
-  bash "$script" "$@" >"$FIXTURE_ROOT/stdout" 2>"$FIXTURE_ROOT/stderr"
+  if (($#)); then
+    bash "$script" --remote "$@" >"$FIXTURE_ROOT/stdout" 2>"$FIXTURE_ROOT/stderr"
+  else
+    bash "$script" >"$FIXTURE_ROOT/stdout" 2>"$FIXTURE_ROOT/stderr"
+  fi
 }
 
 run
@@ -146,10 +200,10 @@ grep -q '^Usage:' "$FIXTURE_ROOT/stdout"
 echo 'ok - no arguments show help without API calls'
 
 if run --bogus; then exit 1; else [[ $? -eq 2 ]]; fi
-if run --release --dry-run; then exit 1; else [[ $? -eq 2 ]]; fi
+if run --release --create; then exit 1; else [[ $? -eq 2 ]]; fi
 echo 'ok - invalid and conflicting options fail'
 
-run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
+run --release --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
 unzip -tq "$zip_file" >/dev/null
 [[ "$(unzip -p "$zip_file" acme/ext/composer.json | jq -r .version)" == 1.2.3-a1 ]]
 unzip -Z1 "$zip_file" | grep -q '^acme/ext/included.txt$'
@@ -157,7 +211,9 @@ if unzip -Z1 "$zip_file" | grep -q excluded.txt; then exit 1; fi
 [[ -z "$(unzip -z "$zip_file" | tail -n +2)" ]]
 grep -q 'Example merged change' "$FIXTURE_ROOT/stdout"
 if grep -qE 'releases with-input|uploads.github.com|releases/123' "$FIXTURE_ROOT/api.log"; then exit 1; fi
-echo 'ok - dry run packages the pinned commit, honors exclusions, and previews notes without publishing'
+[[ "$(git -C "$FIXTURE_ROOT/source" branch --show-current)" == main ]]
+[[ "$(jq -r .version "$FIXTURE_ROOT/source/composer.json")" == 9.9.9 ]]
+echo 'ok - dry run packages the pinned commit, honors exclusions, previews notes, and preserves the dirty local tree'
 
 run --release --repo acme/ext --output "$FIXTURE_ROOT/output"
 jq -e --arg sha "$FIXTURE_COMMIT" '.draft == true and .prerelease == true and .tag_name == "1.2.3-a1" and .target_commitish == $sha and (.body | contains("Example merged change"))' "$FIXTURE_ROOT/create.json" >/dev/null
@@ -190,20 +246,20 @@ for scenario in upload_failure publish_failure; do
 done
 
 export SCENARIO=master_branch
-run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
+run --release --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
 grep -q '^GET repos/acme/ext/commits/master$' "$FIXTURE_ROOT/methods.log"
 grep -q "Source: acme/ext master at $FIXTURE_COMMIT" "$FIXTURE_ROOT/stdout"
 echo 'ok - a repository whose default branch is master is packaged from master'
 
 export SCENARIO=archived
-if run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"; then exit 1; fi
+if run --release --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"; then exit 1; fi
 grep -q 'acme/ext is archived' "$FIXTURE_ROOT/stderr"
 [[ "$(cat "$FIXTURE_ROOT/methods.log")" == 'GET repos/acme/ext' ]]
 echo 'ok - an archived repository is rejected before any other request'
 
 dev_zip="$FIXTURE_ROOT/output/acme-ext-1.2.3-dev.zip"
 export SCENARIO=dev_existing
-run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
+run --release --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
 grep -q 'Would update rolling release 1.2.3-dev in place' "$FIXTURE_ROOT/stdout"
 grep -q "Would move tag 1.2.3-dev from $FIXTURE_COMMIT to $DEV_COMMIT" "$FIXTURE_ROOT/stdout"
 if grep -vE '^(GET |POST repos/acme/ext/releases/generate-notes$)' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
@@ -231,7 +287,7 @@ if grep -q 'Published release' "$FIXTURE_ROOT/stdout"; then exit 1; fi
 echo 'ok - dev release moves the tag, regenerates notes, and replaces the ZIP in the same release'
 
 export SCENARIO=alpha_dev
-run --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
+run --release --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
 grep -q 'Release: 1.2.3-a2-dev (prerelease: true)' "$FIXTURE_ROOT/stdout"
 [[ "$(unzip -p "$FIXTURE_ROOT/output/acme-ext-1.2.3-a2-dev.zip" acme/ext/composer.json | jq -r .version)" == 1.2.3-a2-dev ]]
 echo 'ok - an alpha with -dev (1.2.3-a2-dev) is accepted as a rolling prerelease'
@@ -242,6 +298,46 @@ jq -e --arg sha "$DEV_COMMIT" '.draft == true and .prerelease == true and .tag_n
 grep -q '^POST repos/acme/ext/git/refs$' "$FIXTURE_ROOT/methods.log"
 grep -q 'Published release:' "$FIXTURE_ROOT/stdout"
 echo 'ok - first dev release is created as a normal prerelease'
+# ZIP-only remote creation must not inspect or mutate releases.
+export SCENARIO=existing_release
+run --create --repo acme/ext --output "$FIXTURE_ROOT/zip-only"
+[[ -f "$FIXTURE_ROOT/zip-only/acme-ext-1.2.3-a1.zip" ]]
+if grep -q '/releases' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+echo 'ok - remote ZIP creation does not require a new release version'
+
+export SCENARIO=force_existing
+if run --release --repo acme/ext --output "$FIXTURE_ROOT/output"; then exit 1; fi
+run --release --force --dry-run --repo acme/ext --output "$FIXTURE_ROOT/output"
+grep -q 'Would replace existing release 1.2.3 in place (--force)' "$FIXTURE_ROOT/stdout"
+if grep -vE '^(GET |POST repos/acme/ext/releases/generate-notes$)' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+run --release --force --repo acme/ext --output "$FIXTURE_ROOT/output"
+jq -e --arg sha "$STABLE_COMMIT" '.prerelease == false and .target_commitish == $sha' "$FIXTURE_ROOT/update.json" >/dev/null
+grep -q '^PATCH repos/acme/ext/git/refs/tags/1.2.3$' "$FIXTURE_ROOT/methods.log"
+grep -q 'Updated existing release:' "$FIXTURE_ROOT/stdout"
+if grep -q '/assets/10' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+cmp "$FIXTURE_ROOT/output/acme-ext-1.2.3.zip" "$FIXTURE_ROOT/uploaded.zip"
+echo 'ok - force replaces a stable annotated tag and ZIP, preserving stable status and unrelated assets'
+
+for scenario in force_tag_only force_release_only; do
+  export SCENARIO="$scenario"
+  run --release --force --repo acme/ext --output "$FIXTURE_ROOT/output"
+  grep -q 'release:' "$FIXTURE_ROOT/stdout"
+  echo "ok - $scenario completes a forced replacement"
+done
+
+for scenario in force_tag_failure force_upload_failure force_publish_failure force_immutable; do
+  export SCENARIO="$scenario"
+  if run --release --force --repo acme/ext --output "$FIXTURE_ROOT/output"; then exit 1; fi
+  if grep -qE '^(Updated|Published) .*release:' "$FIXTURE_ROOT/stdout"; then exit 1; fi
+  if [[ "$scenario" == force_upload_failure ]]; then
+    if grep -q '^DELETE repos/acme/ext/releases/assets/7$' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+  fi
+  if [[ "$scenario" == force_immutable ]]; then
+    if grep -qE '^(PATCH|DELETE|POST) ' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+  fi
+  echo "ok - $scenario fails without claiming success or overriding server protections"
+done
+
 # --gh-release from a local checkout, through the same shared release logic.
 unset SCENARIO
 git clone -q "$FIXTURE_ROOT/source" "$FIXTURE_ROOT/local"
@@ -307,6 +403,17 @@ jq -e '.prerelease == true and .tag_name == "1.2.3-a1"' "$FIXTURE_ROOT/create.js
 unzip -Z1 "$FIXTURE_ROOT/uploaded.zip" | grep -q "^AcmeStyle/style.cfg$"
 grep -q 'Published release:' "$FIXTURE_ROOT/stdout"
 echo 'ok - git-release-style.sh --gh-release publishes a prerelease'
+REMOTE_COMMIT=$(git -C "$FIXTURE_ROOT/source" rev-parse style)
+export REMOTE_COMMIT
+run_local git-release-style.sh --create --remote --repo acme/ext --output "$FIXTURE_ROOT/remote-style"
+unzip -Z1 "$FIXTURE_ROOT/remote-style/AcmeStyle_1.2.3-a1.zip" | grep -q '^AcmeStyle/style.cfg$'
+export SCENARIO=force_existing FORCE_VERSION=1.2.3-a1 FORCE_ASSET=AcmeStyle_1.2.3-a1.zip
+run_local git-release-style.sh --release --remote --force
+jq -e '.prerelease == true' "$FIXTURE_ROOT/update.json" >/dev/null
+grep -q 'Updated existing release:' "$FIXTURE_ROOT/stdout"
+echo 'ok - styles support remote ZIP creation and forced prerelease replacement'
+unset SCENARIO REMOTE_COMMIT FORCE_VERSION FORCE_ASSET
+
 
 git -C "$FIXTURE_ROOT/source" checkout -q --orphan langpack
 git -C "$FIXTURE_ROOT/source" rm -rqf --cached .
@@ -321,5 +428,64 @@ jq -e '.prerelease == true and .tag_name == "1.2.3-a1"' "$FIXTURE_ROOT/create.js
 unzip -Z1 "$FIXTURE_ROOT/uploaded.zip" | grep -q '^example_language_1.2.3-a1/language/xx/iso.txt$'
 grep -q 'Published release:' "$FIXTURE_ROOT/stdout"
 echo 'ok - git-release-langpack.sh --gh-release publishes the pack'
+REMOTE_COMMIT=$(git -C "$FIXTURE_ROOT/source" rev-parse langpack)
+export REMOTE_COMMIT
+run_local git-release-langpack.sh --create --remote --repo acme/ext --version 1.2.3-a1 --output "$FIXTURE_ROOT/remote-language"
+unzip -Z1 "$FIXTURE_ROOT/remote-language/example_language_1.2.3-a1.zip" | grep -q '^example_language_1.2.3-a1/language/xx/iso.txt$'
+export SCENARIO=force_existing FORCE_VERSION=1.2.3-a1 FORCE_ASSET=example_language_1.2.3-a1.zip
+run_local git-release-langpack.sh --release --remote --force --version 1.2.3-a1
+jq -e '.prerelease == true' "$FIXTURE_ROOT/update.json" >/dev/null
+grep -q 'Updated existing release:' "$FIXTURE_ROOT/stdout"
+echo 'ok - language packs support remote ZIP creation and forced replacement'
+unset SCENARIO REMOTE_COMMIT FORCE_VERSION FORCE_ASSET
+
+
+# Reuse cached reference/validator fixtures to test the remote validation gate
+# without downloads, dependencies, or execution of language-pack PHP files.
+export XDG_CACHE_HOME="$FIXTURE_ROOT/cache"
+reference="$XDG_CACHE_HOME/git-release-langpack/phpbb-3.3.17/en/language/en"
+validator="$XDG_CACHE_HOME/git-release-langpack/translation-validator-1.6.x"
+mkdir -p "$reference" "$validator/vendor"
+: >"$validator/vendor/autoload.php"
+echo reference >"$reference/common.php"
+cat >"$FIXTURE_ROOT/bin/php" <<'MOCKPHP'
+#!/usr/bin/bash
+set -eu
+stage=''
+for argument in "$@"; do
+  if [[ "$argument" == --package-dir=* ]]; then stage="${argument#*=}"; fi
+done
+[[ -f "$stage/xx/language/xx/iso.txt" && -f "$stage/en/language/en/common.php" ]]
+grep -q '^Example Language$' "$stage/xx/language/xx/iso.txt"
+if [[ "${VALIDATOR_FAIL:-0}" == 1 ]]; then
+  echo 'Fatal: 0, Error: 1'
+  exit 1
+fi
+echo 'Fatal: 0, Error: 0'
+MOCKPHP
+cat >"$FIXTURE_ROOT/bin/composer" <<'MOCKCOMPOSER'
+#!/usr/bin/bash
+# The cached validator must avoid invoking Composer.
+exit 1
+MOCKCOMPOSER
+chmod +x "$FIXTURE_ROOT/bin/php" "$FIXTURE_ROOT/bin/composer"
+REMOTE_COMMIT=$(git -C "$FIXTURE_ROOT/source" rev-parse langpack)
+export REMOTE_COMMIT
+run_local git-release-langpack.sh --create --remote --check --version 3.3.17 --output "$FIXTURE_ROOT/validated"
+grep -q 'Validation passed.' "$FIXTURE_ROOT/stdout"
+validated_zip="$FIXTURE_ROOT/validated/example_language_3.3.17.zip"
+unzip -Z1 "$validated_zip" | grep -q '^example_language_3.3.17/language/xx/iso.txt$'
+# A validation-only run does not save a ZIP or inspect releases.
+run_local git-release-langpack.sh --remote --check --version 3.3.17 --output "$FIXTURE_ROOT/check-only"
+[[ ! -e "$FIXTURE_ROOT/check-only" ]]
+if grep -q '/releases' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+export SCENARIO=force_existing FORCE_VERSION=3.3.17 FORCE_ASSET=example_language_3.3.17.zip VALIDATOR_FAIL=1
+before=$(sha256sum "$validated_zip")
+if run_local git-release-langpack.sh --release --remote --force --check --version 3.3.17 --output "$FIXTURE_ROOT/validated"; then exit 1; fi
+grep -q 'not releasing: the pack does not pass validation' "$FIXTURE_ROOT/stderr"
+[[ "$before" == "$(sha256sum "$validated_zip")" ]]
+if grep -qE '^(POST|PATCH|DELETE) ' "$FIXTURE_ROOT/methods.log"; then exit 1; fi
+echo 'ok - remote language validation uses the packaged snapshot; failure preserves the ZIP and blocks even forced publishing'
+unset SCENARIO REMOTE_COMMIT FORCE_VERSION FORCE_ASSET VALIDATOR_FAIL
 
 echo 'All API release tests passed.'

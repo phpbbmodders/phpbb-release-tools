@@ -4,8 +4,9 @@
 #
 # A version ending in -dev is a rolling prerelease: publishing it again moves its
 # tag to the new commit, regenerates the notes, and replaces the ZIP in the same
-# release, keeping its URL. Other versions are immutable: an existing tag or
-# release is an error. Alpha, beta, RC, and dev versions are marked as prereleases.
+# release, keeping its URL. Other versions require explicit --force to replace
+# an existing tag/release. GitHub-enforced immutability still cannot be overridden.
+# Alpha, beta, RC, and dev versions are marked as prereleases.
 #
 # The caller sets GHR_SCRATCH to a private temporary directory and removes it.
 # Typical use:
@@ -21,6 +22,7 @@
 GHR_REPOSITORY=''
 GHR_PRERELEASE=false
 GHR_ROLLING=false
+GHR_FORCE=false
 GHR_EXISTING_RELEASE_ID=''
 GHR_EXISTING_TAG_SHA=''
 GHR_RELEASE_URL=''
@@ -55,7 +57,7 @@ ghr_require_remote_commit() {
 }
 
 # Classify the version and look up an existing release and tag. Only a rolling
-# -dev version may already have them.
+# -dev version or an explicitly forced release may already have them.
 ghr_check_existing() {
   local version="$1"
   GHR_PRERELEASE=false
@@ -68,17 +70,22 @@ ghr_check_existing() {
   jq -e -s 'all(.[]; type == "array")' "$GHR_SCRATCH/releases.json" >/dev/null || ghr_fail 'Invalid release-list response.'
   GHR_EXISTING_RELEASE_ID=''
   if jq -e -s --arg tag "$version" 'any(.[][]; .tag_name == $tag)' "$GHR_SCRATCH/releases.json" >/dev/null; then
-    [[ "$GHR_ROLLING" == true ]] || ghr_fail "Release $version already exists; inspect it before retrying."
+    [[ "$GHR_ROLLING" == true || "$GHR_FORCE" == true ]] \
+      || ghr_fail "Release $version already exists; use --force to replace it."
     # A rolling release is updated in place, so it must be unambiguous.
     GHR_EXISTING_RELEASE_ID=$(jq -er -s --arg tag "$version" \
       '[.[][] | select(.tag_name == $tag)] | select(length == 1) | .[0].id | select(type == "number" and . > 0) | tostring' \
       "$GHR_SCRATCH/releases.json") || ghr_fail "Expected exactly one release for $version; inspect the releases before retrying."
+    if jq -e -s --arg tag "$version" 'any(.[][]; .tag_name == $tag and .immutable == true)' "$GHR_SCRATCH/releases.json" >/dev/null; then
+      ghr_fail "GitHub marks release $version immutable; --force cannot override that protection."
+    fi
   fi
   ghr_api "repos/$GHR_REPOSITORY/git/matching-refs/tags/$version" >"$GHR_SCRATCH/tags.json"
   jq -e 'type == "array"' "$GHR_SCRATCH/tags.json" >/dev/null || ghr_fail 'Invalid tag-list response.'
   GHR_EXISTING_TAG_SHA=''
   if jq -e --arg ref "refs/tags/$version" 'any(.[]; .ref == $ref)' "$GHR_SCRATCH/tags.json" >/dev/null; then
-    [[ "$GHR_ROLLING" == true ]] || ghr_fail "Tag $version already exists; change the version before publishing another release."
+    [[ "$GHR_ROLLING" == true || "$GHR_FORCE" == true ]] \
+      || ghr_fail "Tag $version already exists; use --force to replace it."
     # An annotated tag reports its tag object, which never equals the commit and so counts as moved.
     GHR_EXISTING_TAG_SHA=$(jq -er --arg ref "refs/tags/$version" \
       '.[] | select(.ref == $ref) | .object.sha | select(test("^[0-9a-f]{40}$"))' "$GHR_SCRATCH/tags.json") || ghr_fail 'Invalid tag response.'
@@ -98,7 +105,11 @@ ghr_preview() {
   local version="$1" commit="$2"
   echo "Release: $version (prerelease: $GHR_PRERELEASE)"
   if [[ -n "$GHR_EXISTING_RELEASE_ID" ]]; then
-    echo "Would update rolling release $version in place."
+    if [[ "$GHR_ROLLING" == true ]]; then
+      echo "Would update rolling release $version in place."
+    else
+      echo "Would replace existing release $version in place (--force)."
+    fi
   elif [[ "$GHR_ROLLING" == true ]]; then
     echo "Would create rolling release $version."
   fi
@@ -120,14 +131,14 @@ ghr_upload_asset() {
     '.name == $name and .state == "uploaded" and .size == $size' "$GHR_SCRATCH/asset.json" >/dev/null || ghr_fail 'Upload response does not match the package.'
 }
 
-# Publish the ZIP: create a new release, or update the rolling -dev release.
+# Publish the ZIP: create a new release, or update a rolling/forced release.
 ghr_publish() {
   local version="$1" commit="$2" zip="$3"
   local filename
   filename=$(basename -- "$zip")
 
   # Rolling -dev: point the tag at the pinned commit, creating it if missing.
-  if [[ "$GHR_ROLLING" == true && ( -n "$GHR_EXISTING_TAG_SHA" || -n "$GHR_EXISTING_RELEASE_ID" ) ]]; then
+  if [[ ( "$GHR_ROLLING" == true || "$GHR_FORCE" == true ) && ( -n "$GHR_EXISTING_TAG_SHA" || -n "$GHR_EXISTING_RELEASE_ID" ) ]]; then
     if [[ -n "$GHR_EXISTING_RELEASE_ID" ]]; then
       GHR_RELEASE_URL=$(jq -er -s --arg tag "$version" '[.[][] | select(.tag_name == $tag)][0].html_url' "$GHR_SCRATCH/releases.json")
     fi
@@ -143,7 +154,7 @@ ghr_publish() {
   fi
 
   if [[ -n "$GHR_EXISTING_RELEASE_ID" ]]; then
-    ghr_update_rolling "$version" "$commit" "$zip" "$filename"
+    ghr_update_release "$version" "$commit" "$zip" "$filename"
     return
   fi
 
@@ -172,16 +183,20 @@ ghr_publish() {
   echo "Published release: $GHR_RELEASE_URL"
 }
 
-# Update the existing rolling release in place: notes, then the ZIP, then publish.
-ghr_update_rolling() {
+# Update an existing release in place: notes, then the ZIP, then publish.
+ghr_update_release() {
   local version="$1" commit="$2" zip="$3" filename="$4"
   local release_id="$GHR_EXISTING_RELEASE_ID" staging new_asset_id stale_id old_id
-  echo "Updating rolling release: $GHR_RELEASE_URL"
+  local kind='existing'
+  if [[ "$GHR_ROLLING" == true ]]; then kind='rolling'; fi
+  echo "Updating $kind release: $GHR_RELEASE_URL"
   # Draft state is left alone here; publication happens only after the new ZIP is in place.
   jq -n --arg tag "$version" --arg commit "$commit" --rawfile body "$GHR_SCRATCH/notes.md" \
-    '{tag_name:$tag, target_commitish:$commit, name:$tag, body:$body, prerelease:true}' >"$GHR_SCRATCH/update.json"
+    --argjson prerelease "$GHR_PRERELEASE" \
+    '{tag_name:$tag, target_commitish:$commit, name:$tag, body:$body, prerelease:$prerelease}' >"$GHR_SCRATCH/update.json"
   ghr_api "repos/$GHR_REPOSITORY/releases/$release_id" --method PATCH --input "$GHR_SCRATCH/update.json" >"$GHR_SCRATCH/release.json"
-  jq -e --arg tag "$version" '.tag_name == $tag and .prerelease == true' "$GHR_SCRATCH/release.json" >/dev/null || ghr_fail 'Release update was not confirmed.'
+  jq -e --arg tag "$version" --argjson prerelease "$GHR_PRERELEASE" \
+    '.tag_name == $tag and .prerelease == $prerelease' "$GHR_SCRATCH/release.json" >/dev/null || ghr_fail 'Release update was not confirmed.'
 
   # Upload under a staging name first so the old ZIP stays available until the new one is confirmed.
   staging="$filename.new"
@@ -200,9 +215,9 @@ ghr_update_rolling() {
   jq -e --arg name "$filename" '.name == $name' "$GHR_SCRATCH/renamed.json" >/dev/null || ghr_fail 'Asset rename was not confirmed.'
 
   ghr_api "repos/$GHR_REPOSITORY/releases/$release_id" --method PATCH -F draft=false >"$GHR_SCRATCH/published.json"
-  jq -e '.draft == false and .prerelease == true' "$GHR_SCRATCH/published.json" >/dev/null || ghr_fail 'Publication was not confirmed.'
+  jq -e --argjson prerelease "$GHR_PRERELEASE" '.draft == false and .prerelease == $prerelease' "$GHR_SCRATCH/published.json" >/dev/null || ghr_fail 'Publication was not confirmed.'
   GHR_COMPLETED=true
-  echo "Updated rolling release: $GHR_RELEASE_URL"
+  echo "Updated $kind release: $GHR_RELEASE_URL"
 }
 
 # For an EXIT trap: name a release that a failed run left in an unknown state.
