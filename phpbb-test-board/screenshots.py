@@ -1058,6 +1058,55 @@ def shots_topicclaim(board: Board, shoot: Shooter, args: argparse.Namespace) -> 
                admin=True)
 
 
+def shots_printallposts(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/printallposts: the Print all link in the Topic tools menu and the page it opens.
+
+    Use --seed with seed-forum's bin/seed-standard-fixtures.php for a topic
+    with replies. Shown as a guest, who has the Can print topic permission in
+    the seeded forums, so no moderator tools appear. Two posts per page split
+    the topic over pages, so the print page shows it gathering every post.
+    """
+    _, topic = busiest_forum_and_topic(board)
+    set_config(board, {"posts_per_page": "2"})
+
+    def open_topic_tools(p) -> None:
+        # Crop to the title, the menu and the first post
+        p.add_style_tag(content="#page-body > .post ~ *:not(.action-bar.bar-top) { display: none; }")
+        p.click(".action-bar.bar-top .topic-tools .dropdown-trigger")
+        p.wait_for_selector(".action-bar.bar-top .topic-tools .dropdown:visible")
+    shoot.shot("printallposts-topic-tools", f"viewtopic.php?t={topic}", selector="#page-body",
+               prepare=open_topic_tools)
+    shoot.shot("printallposts-print", f"viewtopic.php?t={topic}&view=printall", selector="#wrap")
+
+
+# Seeded posts come from 127.0.0.1, which the extension hides; this public DNS
+# server's address is shown instead.
+POSTERIP_EXAMPLE_IP = "8.8.8.8"
+
+
+def shots_posteripinviewtopic(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/posteripinviewtopic: the IP address in a post's profile column and its lookup popup.
+
+    Use --seed with seed-forum's bin/seed-standard-fixtures.php for a topic
+    with replies. The busiest topic's posts get POSTER_IP_EXAMPLE_IP. The IP
+    is shown only to moderators, so both shots are taken as the admin. The
+    popup is a real lookup: the board asks ip-api.com, so the run needs
+    internet access.
+    """
+    _, topic = busiest_forum_and_topic(board)
+    board.sql("UPDATE phpbb_posts SET poster_ip = ? WHERE topic_id = ?", (POSTERIP_EXAMPLE_IP, topic))
+    post = board.sql("SELECT post_id FROM phpbb_posts WHERE topic_id = ? ORDER BY post_time, post_id LIMIT 1",
+                     (topic,))[0][0]
+
+    def look_up(p) -> None:
+        p.click(f"#p{post} a.posterip")
+        p.wait_for_selector("#phpbb_alert:visible")
+        p.wait_for_timeout(400)  # the popup fades in
+    shoot.shot("posteripinviewtopic-viewtopic", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True,
+               selector=f"#p{post}")
+    shoot.shot("posteripinviewtopic-lookup", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True, prepare=look_up)
+
+
 SHOTS = {
     "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/copylinks": shots_copylinks,
@@ -1065,6 +1114,8 @@ SHOTS = {
     "phpbbmodders/feedlinks": shots_feedlinks,
     "phpbbmodders/knowledgebase": shots_knowledgebase,
     "phpbbmodders/newspage": shots_newspage,
+    "phpbbmodders/posteripinviewtopic": shots_posteripinviewtopic,
+    "phpbbmodders/printallposts": shots_printallposts,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
     "phpbbmodders/topicclaim": shots_topicclaim,
