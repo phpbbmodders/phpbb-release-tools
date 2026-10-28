@@ -237,6 +237,70 @@ def check_separatebots(b: Board) -> None:
     ok(re.search(r"<br\s*/?>\s*Bots:\s*.*Google \[Bot\]", body), "a visiting bot is listed on its own 'Bots:' line")
 
 
+def check_posteripinviewtopic(b: Board) -> None:
+    # The install's welcome post comes from 127.0.0.1, which the extension hides.
+    # The lookup really asks ip-api.com about this documentation address, but only
+    # the status code is checked, so the result doesn't depend on that service.
+    b.sql("UPDATE phpbb_posts SET poster_ip = '203.0.113.7' WHERE post_id = 1")
+    forum = b.sql("SELECT forum_id FROM phpbb_posts WHERE post_id = 1")[0][0]
+    mod_pw, member_pw = secrets.token_urlsafe(12), secrets.token_urlsafe(12)
+    mod_id = b.add_user("pipmod", mod_pw)
+    b.add_user("pipmember", member_pw)
+    # Standard Moderator in the welcome post's forum only, not a global moderator
+    role = b.sql("SELECT role_id FROM phpbb_acl_roles WHERE role_name = 'ROLE_MOD_STANDARD'")[0][0]
+    b.sql("INSERT INTO phpbb_acl_users (user_id, forum_id, auth_option_id, auth_role_id, auth_setting) "
+          "VALUES (?, ?, 0, ?, 0)", (mod_id, forum, role))
+    b.sql("UPDATE phpbb_users SET user_permissions = ''")
+    b.purge_cache()
+    lookup = f"{b.base}/app.php/freegeoip/1"
+    ajax = {"X-Requested-With": "XMLHttpRequest"}
+
+    def sees_ip(s: requests.Session) -> bool:
+        return "203.0.113.7" in s.get(f"{b.base}/viewtopic.php?t=1").text
+
+    for label, user, pw, allowed in (("administrator", None, None, True), ("moderator of the forum", "pipmod", mod_pw, True),
+                                      ("member", "pipmember", member_pw, False)):
+        s = requests.Session()
+        b.login(s, user, pw)
+        if allowed:
+            ok(sees_ip(s), f"{label} sees the poster's IP")
+            ok(s.get(lookup, headers=ajax).status_code == 200, f"{label} can look the IP up")
+        else:
+            ok(not sees_ip(s), f"{label} doesn't see the poster's IP")
+            ok(s.get(lookup, headers=ajax).status_code == 403, f"{label} gets 403 from the lookup")
+
+
+def check_printallposts(b: Board) -> None:
+    # A reply, so the topic has two posts, and an image attached to the welcome post, which the
+    # print page leaves out like phpBB's own print view
+    forum = b.sql("SELECT forum_id FROM phpbb_posts WHERE post_id = 1")[0][0]
+    now = int(time.time())
+    b.sql("INSERT INTO phpbb_posts (topic_id, forum_id, poster_id, poster_ip, post_time, post_visibility, "
+          "post_subject, post_text, bbcode_uid, bbcode_bitfield) "
+          "VALUES (1, ?, 2, '127.0.0.1', ?, 1, 'Re: probe', '<t>Second probe post</t>', '', '')", (forum, now))
+    probe = b.root / "files" / "2_printallprobe"
+    shutil.copy(b.root / "images/smilies/icon_e_smile.gif", probe)
+    try:
+        b.sql("INSERT INTO phpbb_attachments (post_msg_id, topic_id, in_message, poster_id, is_orphan, "
+              "physical_filename, real_filename, download_count, attach_comment, extension, mimetype, filesize, "
+              "filetime, thumbnail) VALUES (1, 1, 0, 2, 0, '2_printallprobe', 'printall-probe.gif', 0, '', 'gif', "
+              "'image/gif', ?, ?, 0)", (probe.stat().st_size, now))
+        b.sql("UPDATE phpbb_posts SET post_attachment = 1 WHERE post_id = 1")
+        b.sql("UPDATE phpbb_topics SET topic_attachment = 1, topic_posts_approved = 2 WHERE topic_id = 1")
+        b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'posts_per_page'")
+        b.purge_cache()
+        admin = requests.Session()
+        b.login(admin)
+        ok("view=printall" in admin.get(f"{b.base}/viewtopic.php?t=1").text, "Print all link in the Topic tools menu")
+        body = admin.get(f"{b.base}/viewtopic.php?t=1&view=printall").text
+        ok("Second probe post" in body and "This is an example post" in body,
+           "with one post per page, the print page still shows both posts")
+        ok("printall-probe.gif" not in body and "attachbox" not in body,
+           "no attachments on the print page, as in phpBB's own print view")
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def check_reassignthumbs(b: Board) -> None:
     upload = b.root / "files"
     names = ["probe_image1", "probe_image2", "probe_image3"]
@@ -370,6 +434,8 @@ CHECKS = {
     "phpbbmodders/groupwarn": check_groupwarn,
     "phpbbmodders/documentation": check_documentation,
     "phpbbmodders/separatebots": check_separatebots,
+    "phpbbmodders/posteripinviewtopic": check_posteripinviewtopic,
+    "phpbbmodders/printallposts": check_printallposts,
     "phpbbmodders/reassignthumbs": check_reassignthumbs,
     "phpbbmodders/honeypot": check_honeypot,
     "phpbbmodders/adduser": check_adduser,
