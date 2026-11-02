@@ -808,6 +808,10 @@ def shots_contactadmin(board: Board, shoot: Shooter, args: argparse.Namespace) -
     update gallery: the delivery settings with the board's email turned off,
     the guest form with the username rules and privacy policy box, and a
     guest's message posted by the contact bot, labelled "Guest User".
+    contactadmin-acp-nav-links, -header-link-off and -footer-link-on show the
+    11/01/2026 navigation link settings: the two settings, and the header and
+    footer of a board with the header link turned off. They need 1.6.2-dev
+    or later.
     """
     set_config(board, CONTACTADMIN_CONFIG)
     acp = "adm/index.php?i=-phpbbmodders-contactadmin-acp-contactadmin_module&mode=configuration&sid={sid}"
@@ -821,6 +825,22 @@ def shots_contactadmin(board: Board, shoot: Shooter, args: argparse.Namespace) -
               (CONTACTADMIN_REASONS,))
     set_config(board, {"contactadmin_gdpr": "1", "contactadmin_username_chk": "1"})
     shoot.shot("contactadmin-guest-checks", "app.php/contactadmin")
+
+    # The header and footer link settings, shown alone, then a board with the header link off
+    if board.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'contactadmin_header_link'"):
+        def only_link_settings(p) -> None:
+            p.add_style_tag(content="fieldset:has(input[name='header_link']) > dl"
+                                    ":not(:has(input[name='header_link'], input[name='footer_link'])) { display: none; }")
+        shoot.shot("contactadmin-acp-nav-links", acp, admin=True,
+                   selector="fieldset:has(input[name='header_link'])", prepare=only_link_settings)
+        set_config(board, {"contactadmin_header_link": "0"})
+
+        def highlight_contact_link(p) -> None:
+            p.add_style_tag(content="a[href*='contactadmin'] { background: #ffd54f; border-radius: 3px; padding: 2px 3px; }")
+        shoot.shot("contactadmin-header-link-off", "index.php", selector="#page-header")
+        shoot.shot("contactadmin-footer-link-on", "index.php", selector="#page-footer .navbar",
+                   prepare=highlight_contact_link)
+        set_config(board, {"contactadmin_header_link": "1"})
 
     # Send a guest message by forum post, then show the topic the contact bot posted
     set_config(board, {"contactadmin_method": "1", "contactadmin_gdpr": "0", "contactadmin_username_chk": "0"})
