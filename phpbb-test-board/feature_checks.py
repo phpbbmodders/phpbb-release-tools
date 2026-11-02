@@ -424,7 +424,71 @@ def check_sfscompanion(b: Board) -> None:
        "a member without m_chk_sfs can't open the lookup page")
 
 
+def check_contactadmin(b: Board) -> None:
+    def nav_links(html: str) -> tuple:
+        """Return whether the header and footer navigation bars link to the contact page."""
+        header = re.search(r'(?s)id="nav-main".*?id="nav-breadcrumbs"', html)
+        footer = re.search(r'(?s)id="nav-footer".*', html)
+        return tuple(bool(m and "app.php/contactadmin" in m.group(0)) for m in (header, footer))
+
+    # A fresh board can't send email, so deliver by private message; with
+    # email delivery the contact page shows an error and the ACP won't save.
+    b.sql("UPDATE phpbb_config SET config_value = '2' WHERE config_name = 'contactadmin_method'")
+    b.purge_cache()
+    ok(nav_links(requests.get(f"{b.base}/index.php").text) == (True, True),
+       "guest sees the contact link in the header and footer navigation")
+    ok('name="message"' in requests.get(f"{b.base}/app.php/contactadmin").text, "guest contact form loads")
+
+    if not b.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'contactadmin_header_link'"):
+        print("  [skip] header/footer link settings (not in this version)")
+        return
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%contactadmin%' "
+                "AND module_mode = 'configuration'")[0][0]
+    page_url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
+
+    def save(header: str, footer: str) -> None:
+        """Submit the settings page as shown, changing only the two link settings."""
+        html = admin.get(page_url).text
+        form = re.search(r'(?s)<form[^>]*id="contactadmin".*?</form>', html).group(0)
+        action, fields = form_fields(html, "contactadmin")
+        for tag in re.findall(r'<input\b[^>]*>', form):
+            attrs = dict(re.findall(r'(\w+)="([^"]*)"', tag))
+            if "name" in attrs and (attrs.get("type") in ("text", "number")
+                                    or (attrs.get("type") == "radio" and "checked" in attrs)):
+                fields[attrs["name"]] = attrs.get("value", "")
+        fields.update(re.findall(r'(?s)<textarea[^>]*name="([^"]+)"[^>]*>(.*?)</textarea>', form))
+        for name, options in re.findall(r'(?s)<select[^>]*name="([^"]+)"[^>]*>(.*?)</select>', form):
+            selected = re.search(r'<option value="([^"]*)"[^>]*selected', options)
+            if selected:
+                fields[name] = selected.group(1)
+        post_back(admin, f"{b.base}/adm", page_url, action,
+                  {**fields, "header_link": header, "footer_link": footer, "submit": "Submit"})
+
+    def config(name: str) -> str:
+        return b.sql("SELECT config_value FROM phpbb_config WHERE config_name = ?", (name,))[0][0]
+
+    before = {r[0]: r[1] for r in b.sql("SELECT config_name, config_value FROM phpbb_config "
+                                         "WHERE config_name LIKE 'contactadmin_%'")}
+    save("0", "1")
+    ok(config("contactadmin_header_link") == "0", "ACP: header link turned off")
+    ok(nav_links(requests.get(f"{b.base}/index.php").text) == (False, True), "header link gone, footer link kept")
+    save("1", "0")
+    ok(nav_links(requests.get(f"{b.base}/index.php").text) == (True, False), "footer link gone, header link kept")
+    save("0", "0")
+    ok(nav_links(requests.get(f"{b.base}/index.php").text) == (False, False), "both links off: neither shown")
+    ok('name="message"' in requests.get(f"{b.base}/app.php/contactadmin").text,
+       "both links off: the contact form still loads")
+    after = {r[0]: r[1] for r in b.sql("SELECT config_name, config_value FROM phpbb_config "
+                                        "WHERE config_name LIKE 'contactadmin_%'")}
+    changed = sorted(k for k in before if before[k] != after.get(k)
+                     and k not in ("contactadmin_header_link", "contactadmin_footer_link"))
+    ok(not changed, "saving the settings changed no other setting" + (f": {changed}" if changed else ""))
+
+
 CHECKS = {
+    "phpbbmodders/contactadmin": check_contactadmin,
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
     "phpbbmodders/wiki": check_wiki,
     "phpbbmodders/banlist": check_banlist,
