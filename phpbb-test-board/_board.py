@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import time
@@ -237,6 +238,119 @@ class Board:
                        "'user_email'=>" + json.dumps(f"{name}@example.com") + ",'group_id'=>2,"
                        "'user_type'=>USER_NORMAL,'user_regdate'=>time()]);")
         return int(out.strip().splitlines()[-1])
+
+    def route(self, path: str) -> str:
+        """Return the board-relative URL of an extension route (app.php/PATH on phpBB 3.3)."""
+        return f"app.php/{path}"
+
+
+class SeedBoard(Board):
+    """An installed seed-forum board, on any database seed-forum supports.
+
+    seed-forum builds and seeds the board, with its extensions enabled; this
+    only drives it. PHP, SQL and phpBB's CLI run through seed-forum's
+    bin/board-php.py (host PHP, or a driver container for MSSQL) and
+    bin/board-sql.php (phpBB's own database layer), so the same checks work on
+    SQLite, MySQL, MariaDB, PostgreSQL and MSSQL. The admin login is
+    seed-forum's fixture admin. Nothing is installed or reset here: rebuild the
+    board with seed-forum between runs that change it.
+    """
+
+    ADMIN_USER = "admin"
+    ADMIN_PASSWORD = "KbTest1234!"
+
+    def __init__(self, root: str, port: int, seed_forum: str) -> None:
+        self.root = Path(root).expanduser().resolve()
+        if not (self.root / "config.php").is_file():
+            raise SystemExit(f"error: no installed board at {self.root}; build it with seed-forum first")
+        self.seed_forum = Path(seed_forum).expanduser().resolve()
+        if not (self.seed_forum / "bin/board-php.py").is_file():
+            raise SystemExit(f"error: {self.seed_forum} has no bin/board-php.py; pass a seed-forum checkout "
+                             "with board.database support")
+        self.admin_user = self.ADMIN_USER
+        self.admin_password = self.ADMIN_PASSWORD
+        self.port = port
+        self.base = f"http://localhost:{port}"
+        # Inside the board, so a driver container can write it too.
+        self.php_log = self.root / ".seed-forum-php-errors.log"
+        self.installed = []
+        constants = (self.root / "includes/constants.php").read_text()
+        version = re.search(r"define\('PHPBB_VERSION', '([^']+)'\)", constants)
+        self.version = version.group(1) if version else ""
+
+    def _php(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+        """Run PHP for this board through seed-forum's board-php.py."""
+        r = subprocess.run(["python3", str(self.seed_forum / "bin/board-php.py"), str(self.root), *args],
+                           cwd=self.root, capture_output=True, text=True, timeout=600)
+        if check and r.returncode != 0:
+            raise RuntimeError(f"PHP failed: {(r.stderr or r.stdout).strip()[-400:]}")
+        return r
+
+    def cli(self, *args: str) -> str:
+        """Run phpBB's CLI and return its combined output."""
+        r = self._php("bin/phpbbcli.php", *args, "--no-interaction", check=False)
+        return r.stdout + r.stderr
+
+    def purge_cache(self) -> None:
+        """Purge the board's cache through phpBB's CLI."""
+        out = self.cli("cache:purge")
+        if "Purged" not in out and "purged" not in out:
+            raise RuntimeError(f"cache purge failed: {out.strip()[-300:]}")
+
+    def sql(self, query: str, args: tuple = ()) -> list:
+        """Run one SQL statement through phpBB's database layer; return rows as tuples.
+
+        Values come back as phpBB's driver returns them, which on most
+        databases means strings, so compare numbers as strings.
+        """
+        r = self._php(str(self.seed_forum / "bin/board-sql.php"), str(self.root), query, json.dumps(list(args)))
+        result = json.loads(r.stdout.strip().splitlines()[-1])
+        return [tuple(row) for row in result] if isinstance(result, list) else []
+
+    def php(self, code: str, check: bool = False) -> str:
+        """Run PHP inside the board (common.php and functions_user.php loaded); return its output."""
+        boot = ("define('IN_PHPBB',1);$phpbb_root_path='./';$phpEx='php';require 'common.php';"
+                "require 'includes/functions_user.php';$user->session_begin();$auth->acl($user->data);$user->setup();")
+        return self._php("-r", boot + code, check=check).stdout
+
+    def reset(self) -> None:
+        """Not available: rebuild a seed-forum board with seed-forum --reset."""
+        raise RuntimeError("a seed-forum board is rebuilt with seed-forum --reset, not by feature checks")
+
+    @contextmanager
+    def serve(self) -> Iterator[None]:
+        """Serve the board on its own port, with PHP error logging on.
+
+        Refuses to start when something already answers on the port, so the
+        checks never run against a leftover server for another board.
+        """
+        with socket.socket() as probe:
+            if probe.connect_ex(("127.0.0.1", self.port)) == 0:
+                raise RuntimeError(f"port {self.port} is already in use; stop whatever serves it first")
+        self.php_log.write_text("")
+        server = subprocess.Popen(["python3", str(self.seed_forum / "bin/board-php.py"), str(self.root),
+                                   "-d", "opcache.enable=0", "-d", "log_errors=1",
+                                   "-d", f"error_log={self.php_log}", "-S", f"127.0.0.1:{self.port}",
+                                   "-t", str(self.root)],
+                                  cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(300):
+                try:
+                    requests.head(f"{self.base}/images/index.htm", timeout=2)
+                    break
+                except requests.ConnectionError:
+                    time.sleep(0.1)
+            yield
+        finally:
+            server.terminate()
+            try:
+                server.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                server.kill()
+
+    def route(self, path: str) -> str:
+        """Return the board-relative URL of an extension route (index.php/PATH on phpBB 4.0)."""
+        return f"index.php/{path}" if self.version.startswith("4.") else f"app.php/{path}"
 
 
 # Composer packages that are never phpBB extensions.

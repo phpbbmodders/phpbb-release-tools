@@ -91,6 +91,20 @@ phpbb-test-board/feature_checks.py path/to/extension[@REF] [more extensions...]
 
 Exercises the main feature of each phpbbmodders extension that has a check. One example: a moderator can't warn a user in a group that isn't ticked. `--help` lists the extensions with checks. To add one, write a `check_<name>()` function and add it to the `CHECKS` table, keyed by the extension's composer name.
 
+**On another database:** `--seed-board BOARD_ROOT --port PORT` runs the same checks against a board that [seed-forum](https://github.com/phpbbmodders/seed-forum) built, on whichever database it uses: SQLite, MySQL, MariaDB, PostgreSQL or MSSQL. The extensions must already be enabled there, and `--port` is the board's own `server_port`. Nothing is installed or reset. After its check, each extension is disabled, purged and enabled again through phpBB's CLI, which runs its migrations backwards and forwards on that database. SQL and PHP go through seed-forum's `bin/board-sql.php` and `bin/board-php.py`; `--seed-forum DIR` points at the checkout (default: `seed-forum` next to this repository). A check should build route URLs with `b.route("path")`, which gives `app.php/path` on phpBB 3.3 and `index.php/path` on 4.0, and compare numbers from `b.sql()` as strings, since most database drivers return them that way.
+
+### `db-matrix.sh`: every phpBB branch and database
+
+```bash
+phpbb-test-board/db-matrix.sh path/to/extension [-b 3.3,master] [-d sqlite,mysql,mariadb,postgres,mssql]
+```
+
+For each phpBB branch and database, builds a seed-forum board with the extension enabled (bind-mounted from the checkout as it is on disk), runs `feature_checks.py --seed-board` against it, and stops that board's database container. It prints a line per board and a summary. Boards and logs go in `--work-dir` (default `~/.cache/phpbb-release-tools/db-matrix`) and are rebuilt on every run; ports start at `--base-port` (default 8130). Oracle isn't covered: phpBB is dropping it.
+
+The MSSQL container accepts Microsoft's SQL Server Developer licence; leave `mssql` out of `-d` if that hasn't been agreed. Needs Docker and a seed-forum checkout with `board.database` support.
+
+Exit status: 0 when every board passed, 1 when one failed, 2 for bad arguments.
+
 ### `screenshots.py`: documentation screenshots
 
 ```bash

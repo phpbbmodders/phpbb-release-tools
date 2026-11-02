@@ -6,6 +6,9 @@ For each extension checkout given, installs it into a clean copy of the board
 (created by setup-board.sh), after the --with extensions it requires, serves the board, runs that extension's feature
 check over HTTP, and restores the board. Checks exist for the extensions in
 CHECKS below, keyed by composer name; add one there for a new extension.
+With --seed-board the same checks run against an installed seed-forum board
+instead, on whichever database it uses, followed by a disable/purge/enable
+round trip of each extension through phpBB's CLI.
 Test users get random throwaway passwords that are never printed.
 
 Exit status: 0 if every check passed, 1 if any failed, 2 for bad arguments.
@@ -27,7 +30,7 @@ ensure_venv()
 
 import requests  # noqa: E402
 
-from _board import Board, ext_name, parse_spec, required_packages  # noqa: E402
+from _board import Board, SeedBoard, ext_name, parse_spec, required_packages  # noqa: E402
 
 results: list = []
 
@@ -429,15 +432,30 @@ def check_contactadmin(b: Board) -> None:
         """Return whether the header and footer navigation bars link to the contact page."""
         header = re.search(r'(?s)id="nav-main".*?id="nav-breadcrumbs"', html)
         footer = re.search(r'(?s)id="nav-footer".*', html)
-        return tuple(bool(m and "app.php/contactadmin" in m.group(0)) for m in (header, footer))
+        return tuple(bool(m and re.search(r"(app|index)\.php/contactadmin", m.group(0))) for m in (header, footer))
 
+    contact_url = f"{b.base}/{b.route('contactadmin')}"
     # A fresh board can't send email, so deliver by private message; with
     # email delivery the contact page shows an error and the ACP won't save.
+    # No visual confirmation, so a guest can send the form.
     b.sql("UPDATE phpbb_config SET config_value = '2' WHERE config_name = 'contactadmin_method'")
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'contactadmin_confirm'")
     b.purge_cache()
     ok(nav_links(requests.get(f"{b.base}/index.php").text) == (True, True),
        "guest sees the contact link in the header and footer navigation")
-    ok('name="message"' in requests.get(f"{b.base}/app.php/contactadmin").text, "guest contact form loads")
+    ok('name="message"' in requests.get(contact_url).text, "guest contact form loads")
+
+    # A guest's message is stored as a private message to the administrators
+    guest = requests.Session()
+    page = guest.get(contact_url).text
+    action, fields = form_fields(page, "postform")
+    before_pms = int(b.sql("SELECT COUNT(msg_id) FROM phpbb_privmsgs")[0][0])
+    body = post_back(guest, b.base, contact_url, action, {
+        **fields, "username": "Jane Example", "email": "jane@example.com", "email_confirm": "jane@example.com",
+        "contact_subject": "Feature check", "message": "Probe message from the feature check.", "submit": "Submit"})
+    ok("sent successfully" in body, "guest message sent through the contact form")
+    ok(int(b.sql("SELECT COUNT(msg_id) FROM phpbb_privmsgs")[0][0]) == before_pms + 1,
+       "the message was stored as a private message")
 
     if not b.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'contactadmin_header_link'"):
         print("  [skip] header/footer link settings (not in this version)")
@@ -478,7 +496,7 @@ def check_contactadmin(b: Board) -> None:
     ok(nav_links(requests.get(f"{b.base}/index.php").text) == (True, False), "footer link gone, header link kept")
     save("0", "0")
     ok(nav_links(requests.get(f"{b.base}/index.php").text) == (False, False), "both links off: neither shown")
-    ok('name="message"' in requests.get(f"{b.base}/app.php/contactadmin").text,
+    ok('name="message"' in requests.get(contact_url).text,
        "both links off: the contact form still loads")
     after = {r[0]: r[1] for r in b.sql("SELECT config_name, config_value FROM phpbb_config "
                                         "WHERE config_name LIKE 'contactadmin_%'")}
@@ -505,6 +523,43 @@ CHECKS = {
 }
 
 
+def run_seed_board(args: argparse.Namespace) -> int:
+    """Run the feature checks, then a disable/purge/enable round trip, on a seed-forum board."""
+    board = SeedBoard(args.seed_board, args.port, args.seed_forum)
+    print(f"== board {board.root} (phpBB {board.version}, {board_database(board)})")
+    for spec in args.repos:
+        repo = Path(spec.partition("@")[0]).expanduser().resolve()
+        ext = json.loads((repo / "composer.json").read_text())["name"]
+        print(f"== {ext} ({repo.name}, as mounted on the board)")
+        active = board.sql("SELECT ext_active FROM phpbb_ext WHERE ext_name = ?", (ext,))
+        if not active or str(active[0][0]) != "1":
+            ok(False, f"{ext} is not enabled on the board; enable it with seed-forum")
+            continue
+        if ext in CHECKS:
+            with board.serve():
+                CHECKS[ext](board)
+            errors = board.php_errors()
+            ok(not errors, "no PHP errors logged" + (f": {errors[0][:200]}" if errors else ""))
+        else:
+            print("  [skip] no feature check for this extension")
+        # The extension's migrations, reverted and run again on this database
+        for step in ("disable", "purge", "enable"):
+            out = board.cli(f"extension:{step}", ext)
+            ok("Successfully" in out, f"extension:{step}" + ("" if "Successfully" in out else f": {out.strip()[-200:]}"))
+        active = board.sql("SELECT ext_active FROM phpbb_ext WHERE ext_name = ?", (ext,))
+        ok(active and str(active[0][0]) == "1", "enabled again after the round trip")
+
+    failed = [label for good, label in results if not good]
+    print(f"== {len(results) - len(failed)}/{len(results)} checks passed")
+    return 1 if failed else 0
+
+
+def board_database(board: SeedBoard) -> str:
+    """Name the database a seed-forum board runs on."""
+    state = board.root / ".seed-forum-database.json"
+    return json.loads(state.read_text())["engine"] if state.is_file() else "sqlite"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Exercise phpbbmodders extensions' main features on a local test board.",
                                  epilog="Extensions with checks: " + ", ".join(sorted(CHECKS))
@@ -518,8 +573,20 @@ def main() -> int:
     ap.add_argument("-b", "--board-dir",
                     help="board directory created by setup-board.sh (default: $PHPBB_TEST_BOARD)")
     ap.add_argument("-p", "--port", type=int, default=8083,
-                    help="port for the temporary web server (default: 8083)")
+                    help="port for the temporary web server (default: 8083); with --seed-board, the board's "
+                         "own server_port, so its generated links work")
+    ap.add_argument("-s", "--seed-board", metavar="BOARD_ROOT",
+                    help="run against an installed seed-forum board instead (any database seed-forum supports): "
+                         "the extensions must already be enabled there; nothing is installed or reset, and after "
+                         "the checks each extension is disabled, purged and enabled again through phpBB's CLI")
+    ap.add_argument("--seed-forum", metavar="DIR", default=str(Path(__file__).resolve().parents[2] / "seed-forum"),
+                    help="seed-forum checkout used with --seed-board (default: seed-forum next to this repository)")
     args = ap.parse_args()
+
+    if args.seed_board:
+        if args.needed:
+            ap.error("--with can't be combined with --seed-board; enable required extensions with seed-forum")
+        return run_seed_board(args)
 
     try:
         targets = [parse_spec(spec) for spec in args.repos]
