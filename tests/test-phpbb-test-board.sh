@@ -101,6 +101,23 @@ check "rename_upgrade.py with the same name twice says why" \
 check "rename_upgrade.py --with a non-git directory exits 2" \
   exits_with 2 "$tools/rename_upgrade.py" "$renamed" "$renamed" --with "$tmp" -b "$tmp"
 
+# feature_checks.py --seed-board: runs against a seed-forum board; no board is built here
+check "feature_checks.py --help describes --seed-board" \
+  output_has "--seed-board BOARD_ROOT" "$tools/feature_checks.py" --help
+check "feature_checks.py --seed-board without an installed board exits 1" \
+  exits_with 1 "$tools/feature_checks.py" "$tmp/repo" --seed-board "$tmp/no-board"
+check "feature_checks.py --seed-board with --with exits 2" \
+  exits_with 2 "$tools/feature_checks.py" "$tmp/repo" --seed-board "$tmp" --with "$tmp/repo"
+
+# db-matrix.sh: option handling only; no board or container is started
+check "db-matrix.sh without arguments shows help and exits 0" exits_with 0 "$tools/db-matrix.sh"
+check "db-matrix.sh --help shows usage" output_has "Usage: db-matrix.sh" "$tools/db-matrix.sh" --help
+check "db-matrix.sh with an unknown option exits 2" exits_with 2 "$tools/db-matrix.sh" --nope "$tmp"
+check "db-matrix.sh without board.database support in seed-forum exits 2" \
+  exits_with 2 "$tools/db-matrix.sh" --seed-forum "$tmp" "$tmp/repo"
+check "db-matrix.sh with a non-numeric --base-port exits 2" \
+  exits_with 2 "$tools/db-matrix.sh" --base-port abc "$tmp/repo"
+
 # template_a11y.py: icon-only links and buttons need a tooltip and screen-reader text
 a11y="$tmp/a11y-ext/styles/prosilver/template/event"
 mkdir -p "$a11y" "$tmp/a11y-good/styles/all/template"
