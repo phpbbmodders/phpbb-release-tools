@@ -411,6 +411,50 @@ def check_tlink(b: Board) -> None:
        + (f": {warnings[0][:150]}" if warnings else ""))
 
 
+def check_activity24hours(b: Board) -> None:
+    def block(body: str) -> str:
+        m = re.search(r'<div class="stat-block 24stats">(.*?)</div>', body, re.S)
+        return m.group(1) if m else ""
+
+    admin = requests.Session()
+    b.login(admin)
+    page = admin.get(f"{b.base}/index.php")
+    ok(page.status_code == 200 and "admin" in block(page.text), "the admin sees the 24-hour block, listing admin")
+    ok(not block(requests.get(f"{b.base}/index.php").text), "guests don't see the 24-hour block by default")
+    # Guests see it once given its permission (the install only grants it to user, moderator and admin roles)
+    guests = b.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'GUESTS'")[0][0]
+    option = b.sql("SELECT auth_option_id FROM phpbb_acl_options WHERE auth_option = 'u_a24hrs_view'")[0][0]
+    b.sql("INSERT INTO phpbb_acl_groups (group_id, forum_id, auth_option_id, auth_role_id, auth_setting) "
+          "VALUES (?, 0, ?, 0, 1)", (guests, option))
+    b.sql("UPDATE phpbb_users SET user_permissions = ''")
+    b.purge_cache()
+    ok(block(requests.get(f"{b.base}/index.php").text), "guests given u_a24hrs_view see the 24-hour block")
+    b.sql("DELETE FROM phpbb_acl_groups WHERE group_id = ? AND auth_option_id = ?", (guests, option))
+    b.sql("UPDATE phpbb_users SET user_permissions = ''")
+    b.purge_cache()
+    # The listener takes hidebots' listener as an optional service; a wrong type hint
+    # made every index page fail with a TypeError while hidebots was enabled.
+    if (b.root / "ext/rmcgirr83/hidebots/composer.json").is_file():
+        was_enabled = b.sql("SELECT ext_active FROM phpbb_ext WHERE ext_name = 'rmcgirr83/hidebots'")
+        enabled_here = not was_enabled or str(was_enabled[0][0]) != "1"
+        if enabled_here:
+            b.cli("extension:enable", "rmcgirr83/hidebots")
+        b.purge_cache()
+        try:
+            guest_page = requests.get(f"{b.base}/index.php")
+            admin_page = admin.get(f"{b.base}/index.php")
+            ok(guest_page.status_code == 200 and admin_page.status_code == 200,
+               f"with hidebots enabled the index still loads (guest {guest_page.status_code}, "
+               f"admin {admin_page.status_code})")
+            ok(block(admin_page.text), "with hidebots enabled the admin still sees the 24-hour block")
+        finally:
+            if enabled_here:
+                b.cli("extension:disable", "rmcgirr83/hidebots")
+                b.purge_cache()
+    else:
+        print("  [skip] hidebots isn't on this board; the optional-service check needs it")
+
+
 def check_honeypot(b: Board) -> None:
     b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'enable_confirm'")
     b.purge_cache()
@@ -576,6 +620,7 @@ def check_contactadmin(b: Board) -> None:
 
 
 CHECKS = {
+    "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
     "phpbbmodders/wiki": check_wiki,
