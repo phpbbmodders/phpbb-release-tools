@@ -372,6 +372,45 @@ def check_removeextension(b: Board) -> None:
             (upload / f"2_removeextprobe{i}").unlink(missing_ok=True)
 
 
+def check_tlink(b: Board) -> None:
+    # The admin gets the "can use topic link" permission, then posts a topic with a link.
+    forum = b.sql("SELECT forum_id FROM phpbb_posts WHERE post_id = 1")[0][0]
+    option = b.sql("SELECT auth_option_id FROM phpbb_acl_options WHERE auth_option = 'u_phpbbstudio_tlink'")[0][0]
+    b.sql("INSERT INTO phpbb_acl_users (user_id, forum_id, auth_option_id, auth_role_id, auth_setting) "
+          "VALUES (2, 0, ?, 0, 1)", (option,))
+    b.sql("UPDATE phpbb_users SET user_permissions = ''")
+    b.purge_cache()
+    url = "https://www.example.com/tlink-probe"
+    admin = requests.Session()
+    sid = b.login(admin)
+    page_url = f"{b.base}/posting.php?mode=post&f={forum}&sid={sid}"
+    page = admin.get(page_url).text
+    ok('name="tlink"' in page, "the new-topic form has the Link field")
+    action, fields = form_fields(page, "postform")
+    title = "tlink probe " + secrets.token_hex(4)  # unique, so a rerun on the same board reads its own topic
+    post_back(admin, b.base, page_url, action, {**fields, "subject": title,
+                                                "message": "tlink probe message", "tlink": url, "post": "Submit"})
+    rows = b.sql("SELECT tlink, topic_status FROM phpbb_topics WHERE topic_title = ?", (title,))
+    ok(rows and rows[0][0] == url, "the posted topic stores its link")
+    ok(rows and str(rows[0][1]) == "1", "a topic with a link is locked")
+    # submit_post() from code that, unlike posting.php, leaves out topic_first_post_id and post_id
+    out = b.php("set_error_handler(function ($no, $msg) { echo 'PHP-WARNING: ' . $msg . \"\\n\"; return true; }, "
+                "E_WARNING | E_NOTICE);"  # core's own deprecation notices aren't tlink's
+                "include_once 'includes/functions_posting.php';"
+                "$data = ['forum_id' => " + str(int(forum)) + ", 'topic_id' => 0, 'icon_id' => 0, 'poster_id' => 2, "
+                "'enable_bbcode' => true, 'enable_smilies' => true, 'enable_urls' => true, 'enable_sig' => false, "
+                "'message' => 'tlink submit_post probe', 'message_md5' => md5('tlink submit_post probe'), "
+                "'bbcode_uid' => '', 'bbcode_bitfield' => '', 'enable_indexing' => true, 'notify' => false, "
+                "'notify_set' => false, 'post_edit_locked' => false, 'topic_title' => 'tlink submit_post probe', "
+                "'topic_time_limit' => 0, 'forum_name' => '', 'force_approved_state' => ITEM_APPROVED];"
+                "$poll = []; submit_post('post', 'tlink submit_post probe', 'admin', POST_NORMAL, $poll, $data);"
+                "echo 'TOPIC ' . $data['topic_id'] . \"\\n\";", check=True)
+    warnings = [line for line in out.splitlines() if line.startswith("PHP-WARNING")]
+    ok("TOPIC " in out and not warnings,
+       "submit_post() without topic_first_post_id/post_id posts without warnings"
+       + (f": {warnings[0][:150]}" if warnings else ""))
+
+
 def check_honeypot(b: Board) -> None:
     b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'enable_confirm'")
     b.purge_cache()
@@ -549,6 +588,7 @@ CHECKS = {
     "phpbbmodders/printallposts": check_printallposts,
     "phpbbmodders/reassignthumbs": check_reassignthumbs,
     "rmcgirr83/removeextension": check_removeextension,
+    "phpbbstudio/tlink": check_tlink,
     "phpbbmodders/honeypot": check_honeypot,
     "phpbbmodders/adduser": check_adduser,
     "phpbbmodders/sfscompanion": check_sfscompanion,
