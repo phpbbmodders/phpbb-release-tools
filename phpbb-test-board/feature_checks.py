@@ -341,6 +341,37 @@ def check_reassignthumbs(b: Board) -> None:
                 (upload / f).unlink(missing_ok=True)
 
 
+def check_removeextension(b: Board) -> None:
+    # File attachments on the first post; the download link text should lose only
+    # the last extension (removeextension#5: "annual.report.zip" used to become "annual").
+    names = {"annual.report.zip": "annual.report", "archive.tar.gz": "archive.tar", "probe.zip": "probe"}
+    upload = b.root / "files"
+    now = int(time.time())
+    try:
+        for i, real in enumerate(names):
+            physical = upload / f"2_removeextprobe{i}"
+            physical.write_bytes(b"probe")
+            b.sql("INSERT INTO phpbb_attachments (post_msg_id, topic_id, in_message, poster_id, is_orphan, "
+                  "physical_filename, real_filename, download_count, attach_comment, extension, mimetype, "
+                  "filesize, filetime, thumbnail) VALUES (1, 1, 0, 2, 0, ?, ?, 0, '', ?, "
+                  "'application/octet-stream', 5, ?, 0)", (physical.name, real, real.rsplit(".", 1)[1], now))
+        b.sql("UPDATE phpbb_posts SET post_attachment = 1 WHERE post_id = 1")
+        b.sql("UPDATE phpbb_topics SET topic_attachment = 1 WHERE topic_id = 1")
+        b.purge_cache()
+        admin = requests.Session()
+        b.login(admin)
+        body = admin.get(f"{b.base}/viewtopic.php?t=1").text
+        for real, shown in names.items():
+            ok(re.search(rf">\s*{re.escape(shown)}\s*</a>", body), f"{real} is shown as {shown}")
+        ok(not re.search(r">\s*annual\s*</a>", body), "annual.report.zip is not cut at its first dot")
+    finally:
+        b.sql("DELETE FROM phpbb_attachments WHERE physical_filename LIKE '2_removeextprobe%'")
+        b.sql("UPDATE phpbb_posts SET post_attachment = 0 WHERE post_id = 1")
+        b.sql("UPDATE phpbb_topics SET topic_attachment = 0 WHERE topic_id = 1")
+        for i in range(len(names)):
+            (upload / f"2_removeextprobe{i}").unlink(missing_ok=True)
+
+
 def check_honeypot(b: Board) -> None:
     b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'enable_confirm'")
     b.purge_cache()
@@ -517,6 +548,7 @@ CHECKS = {
     "phpbbmodders/posteripinviewtopic": check_posteripinviewtopic,
     "phpbbmodders/printallposts": check_printallposts,
     "phpbbmodders/reassignthumbs": check_reassignthumbs,
+    "rmcgirr83/removeextension": check_removeextension,
     "phpbbmodders/honeypot": check_honeypot,
     "phpbbmodders/adduser": check_adduser,
     "phpbbmodders/sfscompanion": check_sfscompanion,
