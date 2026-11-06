@@ -21,7 +21,9 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _venv import ensure_venv  # noqa: E402
@@ -619,7 +621,87 @@ def check_contactadmin(b: Board) -> None:
     ok(not changed, "saving the settings changed no other setting" + (f": {changed}" if changed else ""))
 
 
+def check_autodbbackup(b: Board) -> None:
+    """Exercise the hourly settings and the extractor against the board's database."""
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_mode = 'settings' "
+                "AND module_basename LIKE '%auto_db_backup_module'")[0][0]
+    page = admin.get(f"{b.base}/adm/index.php?i={mid}&sid={sid}", timeout=20)
+    action, fields = form_fields(page.text, "acp_auto_db_backup")
+    ok(page.ok and "form_token" in fields, "backup settings form opens")
+    next_run = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(second=0, microsecond=0)
+    time.sleep(1.1)
+    response = admin.post(urljoin(page.url, action), data={
+        **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "text",
+        "auto_db_backup_copies": "1", "auto_db_backup_gc": "1", "auto_db_backup_gc_unit": "hours",
+        "auto_db_backup_year": next_run.year, "auto_db_backup_month": next_run.month,
+        "auto_db_backup_day": next_run.day, "auto_db_backup_hour": next_run.hour,
+        "auto_db_backup_minute": next_run.minute, "submit": "Submit",
+    }, timeout=20)
+    configs = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name LIKE 'auto_db_backup_%'"))
+    saved_interval = int(configs["auto_db_backup_gc"])
+    saved_last = int(configs["auto_db_backup_last_gc"])
+    ok(response.ok and saved_interval == 3600 and configs["auto_db_backup_gc_unit"] == "hours"
+       and saved_last + saved_interval == int(next_run.timestamp()), "ACP saves the hourly interval and chosen start")
+
+    # Keep the custom directory and task in the same PHP runtime. The MSSQL
+    # runner starts an isolated PHP container for each command.
+    probe = """
+$directory = sys_get_temp_dir() . '/autodbbackup-' . bin2hex(random_bytes(8));
+if (!mkdir($directory, 0700))
+{
+    throw new RuntimeException('Could not create the private backup fixture directory');
+}
+$old = $directory . '/backup_1600000000_picoautodbbackup1234567890abcdef.sql';
+$manual = $directory . '/backup_1600000001_1234567890abcdef.sql';
+$original = $config['auto_db_backup_directory'];
+$last = (int) $config['auto_db_backup_last_gc'];
+$anchor = time() - 3 * 3600 - 600;
+try
+{
+    file_put_contents($old, 'old fixture');
+    file_put_contents($manual, 'manual fixture');
+    $config->set('auto_db_backup_directory', $directory);
+    $config->set('auto_db_backup_last_gc', $anchor, false);
+    $task = $phpbb_container->get('cron.manager')->find_task('pico.autodbbackup.cron.task.auto_db_backup');
+    $ready = $task && $task->is_ready();
+    if ($ready)
+    {
+        $task->run();
+    }
+    $files = glob($directory . '/*_picoautodbbackup*.sql');
+    echo json_encode([
+        $ready,
+        count($files) === 1 && $files[0] !== $old && filesize($files[0]) > 0
+            && (fileperms($files[0]) & 0777) === 0600,
+        !file_exists($old) && is_file($manual),
+        (int) $config['auto_db_backup_last_gc'] === $anchor + 3 * 3600 && !$task->is_ready(),
+    ], JSON_THROW_ON_ERROR);
+}
+finally
+{
+    $config->set('auto_db_backup_directory', $original);
+    $config->set('auto_db_backup_last_gc', $last, false);
+    foreach (glob($directory . '/*') as $file)
+    {
+        unlink($file);
+    }
+    rmdir($directory);
+}
+"""
+    observed = json.loads(b.php(probe, check=True))
+    for result, label in zip(observed, (
+        "hourly task becomes due",
+        "extractor publishes a private nonempty archive",
+        "retention removes the old automatic backup and keeps the manual file",
+        "late backup keeps its hourly cadence",
+    ), strict=True):
+        ok(result, label)
+
+
 CHECKS = {
+    "pico/autodbbackup": check_autodbbackup,
     "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
