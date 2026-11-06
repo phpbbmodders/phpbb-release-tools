@@ -79,6 +79,7 @@ Installs the extension from git and loads, as a guest and as the admin:
 - the main board pages;
 - the extension's routes;
 - its ACP, MCP and UCP modules in every mode;
+- its page under ACP > Manage extensions, where phpBB reads `composer.json` (the extension's display name must show there);
 - its cron tasks.
 
 It then disables the extension, deletes its data and enables it again. It reports any server error, empty page, phpBB debug notice or PHP error-log entry.

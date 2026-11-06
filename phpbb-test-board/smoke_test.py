@@ -7,6 +7,7 @@ Installs the extension from a git checkout into a clean copy of the board
 --with, serves the board with PHP error logging on,
 and loads:
   - core board pages, as a guest and as the admin
+  - the extension's ACP details page, where phpBB reads its composer.json
   - the extension's routes that need no parameters
   - its ACP, MCP and UCP modules, in every mode
   - its cron tasks (a task with no name is reported: that crashes pages)
@@ -19,10 +20,13 @@ Exit status: 0 if everything was clean, 1 if a problem was found, 2 for bad
 arguments.
 """
 import argparse
+import html
+import json
 import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _venv import ensure_venv  # noqa: E402
@@ -107,6 +111,21 @@ def check_modules(board: Board, report: Report, ns: str, admin: requests.Session
                             admin.get(url, timeout=60))
 
 
+def check_details(board: Board, report: Report, ext: str, target: Path, admin: requests.Session, sid: str) -> None:
+    """Load the ACP extension details page, which reads composer.json through phpBB's metadata manager."""
+    url = (f"{board.base}/adm/index.php?i=acp_extensions&mode=main&action=details"
+           f"&ext_name={quote(ext, safe='')}&sid={sid}")
+    resp = admin.get(url, timeout=60)
+    report.response("admin ACP extension details", resp)
+    try:
+        display = json.loads((target / "composer.json").read_text())["extra"]["display-name"]
+    except (OSError, ValueError, KeyError, TypeError):
+        report.problem("composer.json has no readable extra.display-name")
+        return
+    if display not in html.unescape(resp.text):
+        report.problem(f"the ACP details page doesn't show '{display}': phpBB couldn't read composer.json")
+
+
 def check_cron(board: Board, report: Report, ns: str, admin: requests.Session) -> None:
     """Trigger the extension's cron tasks; report tasks with no name."""
     out = subprocess.run(["php", "-d", "opcache.enable_cli=0", "-r", CRON_TASKS_PHP],
@@ -169,6 +188,7 @@ def main() -> int:
             for page in CORE_PAGES:
                 report.response(f"admin {page}", admin.get(f"{board.base}/{page}", timeout=60))
             report.response("admin adm/index.php", admin.get(f"{board.base}/adm/index.php?sid={sid}", timeout=60))
+            check_details(board, report, ext, target, admin, sid)
             check_routes(board, report, target, {"guest": guest, "admin": admin})
             check_modules(board, report, ns, admin, sid)
             check_cron(board, report, ns, admin)
