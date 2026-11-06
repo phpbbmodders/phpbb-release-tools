@@ -619,7 +619,58 @@ def check_contactadmin(b: Board) -> None:
     ok(not changed, "saving the settings changed no other setting" + (f": {changed}" if changed else ""))
 
 
+def check_elonw(b: Board) -> None:
+    """Use the board's own JavaScript to classify and click links in Chromium."""
+    from playwright.sync_api import sync_playwright
+
+    hostname = "forum.tutorbrasil.com.br"
+    external = "https://noic.com.br/probe"
+    internal = "https://www.tutorbrasil.com.br/probe"
+    b.sql("UPDATE phpbb_users SET user_elonw = 1 WHERE user_id = 1")
+    b.purge_cache()
+    fixture = f"""<div class="content" id="elonw-probe">
+        <a id="elonw-external" href="{external}">External link</a>
+        <a id="elonw-internal" href="{internal}">Internal link</a>
+        <a id="elonw-forum" class="forum_link" href="{external}">External forum link</a>
+        </div>"""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(args=[
+            f"--host-resolver-rules=MAP {hostname} 127.0.0.1",
+            "--no-proxy-server",
+        ])
+        try:
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.add_init_script(f"""
+                window.elonwProbeOpens = [];
+                window.open = (url) => window.elonwProbeOpens.push(url);
+                document.addEventListener('DOMContentLoaded', () => {{
+                    document.body.insertAdjacentHTML('beforeend', {json.dumps(fixture)});
+                    document.querySelector('#elonw-probe').addEventListener('click', (event) => event.preventDefault());
+                }});
+            """)
+            response = page.goto(f"http://{hostname}:{b.port}/index.php", wait_until="load", timeout=30000)
+            ok(response and response.ok, "board index loads on the public-suffix fixture host")
+            page.locator("#elonw-probe").wait_for()
+            page.wait_for_function("() => window.jQuery && window.jQuery.isReady")
+            # A later jQuery-ready callback runs after the extension's callback.
+            page.evaluate("() => new Promise(resolve => window.jQuery(() => resolve()))")
+            ok(page.locator("#elonw-external.elonw").count() == 1, "unrelated .com.br link is marked external")
+            ok(page.locator("#elonw-internal.elonw").count() == 0, "same-site subdomain is unmarked")
+            ok(page.locator("#elonw-forum").get_attribute("onclick") is not None,
+               "unrelated .com.br link forum is marked for a new window")
+            page.locator("#elonw-external").click()
+            page.locator("#elonw-internal").click()
+            ok(page.evaluate("window.elonwProbeOpens") == [external],
+               "only the unrelated site opens a new window")
+            ok(not errors, "no browser JavaScript errors" + (f": {errors[0]}" if errors else ""))
+        finally:
+            browser.close()
+
+
 CHECKS = {
+    "rmcgirr83/elonw": check_elonw,
     "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
