@@ -1054,11 +1054,21 @@ def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: st
             b.cli("cron:run", task)
             time.sleep(1.1)
 
-    # A private directory the PHP process owns, outside the board and any web root
-    directory = b.php("$d = sys_get_temp_dir() . '/adb-check-' . bin2hex(random_bytes(4));"
+    # A private directory the PHP process owns, outside the board and any web root. On a
+    # seed-forum board it goes in BOARD_ROOT.outside, which board-php.py also mounts into
+    # the MSSQL driver containers; each of those has its own /tmp.
+    outside = b.root.with_name(b.root.name + ".outside") if isinstance(b, SeedBoard) else None
+    if outside is not None:
+        outside.mkdir(mode=0o700, exist_ok=True)
+        base = f"'{outside}'"
+    else:
+        base = "sys_get_temp_dir()"
+    directory = b.php(f"$d = {base} . '/adb-check-' . bin2hex(random_bytes(4));"
                       "echo (mkdir($d, 0700) ? realpath($d) : '');").strip()
     ok(directory, f"made a private test directory ({directory})")
     if not directory:
+        if outside is not None:
+            shutil.rmtree(outside, ignore_errors=True)
         return
     try:
         save(str(b.root / "store"))
@@ -1089,6 +1099,8 @@ def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: st
     finally:
         b.sql("UPDATE phpbb_config SET config_value = '' WHERE config_name = 'auto_db_backup_directory'")
         b.php(f"array_map('unlink', glob('{directory}/*')); @rmdir('{directory}');")
+        if outside is not None:
+            shutil.rmtree(outside, ignore_errors=True)
         b.purge_cache()
 
 
