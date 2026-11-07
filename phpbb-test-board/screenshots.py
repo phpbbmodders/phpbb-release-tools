@@ -1164,7 +1164,46 @@ def shots_genders(board: Board, shoot: Shooter, args: argparse.Namespace) -> Non
     shoot.shot("genders-acp-settings-changed", acp, admin=True, full_page=True)
 
 
+def shots_adduser(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/adduser: the Add User page, the CSV check page and the admin-copy setting.
+
+    Board email is on and the new-member post limit is set, so every option
+    shows; nothing is created or sent. adduser-add-user has Global
+    moderators chosen as the group, so the default-group choice offers it.
+    adduser-csv-check is the check page for a small file with one row of
+    each kind of problem. adduser-acp-admin-copy is the User registration
+    settings section that holds the admin-copy setting.
+    """
+    set_config(board, {"email_enable": "1", "require_activation": "0", "new_member_post_limit": "3",
+                       "allow_birthdays": "1"})
+    acp = "adm/index.php?i=-phpbbmodders-adduser-acp-adduser_module&mode={mode}&sid={sid}"
+    csv_file = board.root / "store" / "adduser-screenshot.csv"
+    csv_file.write_text("username,email,password,lang,birthday\n"
+                        "Jane Doe,jane@example.com,,en,14-02-1990\n"
+                        "John Smith,john@example.com,,,\n"
+                        "Maria Garcia,maria@example.com,Correct-horse-42,en,\n"
+                        "Jane Doe,jane.doe@example.com,,,\n"
+                        "Sam Lee,not-an-email,,,31-02-1995\n")
+    shoot.cleanup.append(csv_file)
+
+    def choose_group(p) -> None:
+        p.select_option("#group", label="Global moderators")
+        p.locator("label.default_group").wait_for(state="visible")
+        p.wait_for_timeout(400)
+
+    def check_rows(p) -> None:
+        p.set_input_files("#csv_file", str(csv_file))
+        p.click("input[name=preview]")
+        p.locator("table.table1").first.wait_for()
+
+    shoot.shot("adduser-add-user", acp.replace("{mode}", "main"), admin=True, full_page=True, prepare=choose_group)
+    shoot.shot("adduser-csv-check", acp.replace("{mode}", "csv"), admin=True, full_page=True, prepare=check_rows)
+    shoot.shot("adduser-acp-admin-copy", "adm/index.php?i=acp_board&mode=registration&sid={sid}", admin=True,
+               selector='fieldset:has(input[name="config[adduser_admin_copy]"])')
+
+
 SHOTS = {
+    "phpbbmodders/adduser": shots_adduser,
     "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/genders": shots_genders,
     "phpbbmodders/copylinks": shots_copylinks,
