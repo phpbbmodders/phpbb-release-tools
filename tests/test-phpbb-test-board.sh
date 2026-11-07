@@ -83,6 +83,14 @@ for script in smoke_test.py feature_checks.py screenshots.py; do
     exits_with 2 "$tools/$script" "$tmp/repo" --with "$tmp" -b "$tmp"
 done
 
+# page_a11y.py: arguments are checked before any board is touched
+check "page_a11y.py --help exits 0" exits_with 0 "$tools/page_a11y.py" --help
+check "page_a11y.py --help describes --keys" output_has "--keys" "$tools/page_a11y.py" --help
+check "page_a11y.py without arguments exits 2" exits_with 2 "$tools/page_a11y.py"
+check "page_a11y.py with a page lacking LABEL= exits 2" exits_with 2 "$tools/page_a11y.py" index.php
+check "page_a11y.py with a missing seed-forum board exits 1" \
+  exits_with 1 "$tools/page_a11y.py" -s "$tmp/no-board" "Index=index.php"
+
 # rename_upgrade.py: arguments are checked before any board is touched
 renamed="$tmp/renamed-ext"
 git init -q "$renamed"

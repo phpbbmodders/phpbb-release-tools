@@ -193,6 +193,23 @@ Scans an extension's or style's templates (`styles/`, `adm/style/`, or a style's
 
 In ACP templates (`adm/style/`) use `aria-label` instead of the span: the ACP style has no `sr-only` class, so the text would show. A `title` on the icon itself, phpBB's ACP pattern, counts as the tooltip, and a link around an image with alt text passes. Problems are printed as `FILE:LINE: message`, and the exit status is 1 if there are any. It needs no board and only Python's standard library.
 
+### `page_a11y.py`: automated accessibility checks on a running board
+
+```bash
+phpbb-test-board/page_a11y.py -s path/to/seeded-board -p PORT [-a] [-k] 'LABEL=URL' [more pages...]
+```
+
+Opens each page in Chromium at a desktop and a phone width and runs [axe-core](https://github.com/dequelabs/axe-core) with its WCAG 2.0, 2.1 and 2.2 A and AA rules, plus a reflow check: at the phone width the page must not scroll sideways. `URL` is relative to the board root. With `-a`/`--admin` the pages open as the board admin with the ACP unlocked, and `{sid}` in a URL becomes the admin's session id:
+
+```bash
+phpbb-test-board/page_a11y.py -s ~/repos/seeded-board/adduser-33 -p 8120 -a -k \
+  'Add User=adm/index.php?i=-phpbbmodders-adduser-acp-adduser_module&mode=main&sid={sid}'
+```
+
+With `-k`/`--keys` it also presses Tab through the page's main content and lists every stop with its accessible name; a stop whose look does not change on focus (no outline, shadow, border, background or text change) fails. axe "incomplete" results are listed for review by hand and do not fail the run.
+
+The pinned axe-core release is downloaded from the npm registry on first use, checked against its published sha512 hash, and kept in `~/.cache/phpbb-release-tools/`. `-s` takes a seed-forum board; `-b` a board from `setup-board.sh`. Violations in phpBB's own layout (ACP footer contrast, the phone menu) show up on every page; judge an extension by the elements it adds. An automated scan does not replace testing with a screen reader. The exit status is 1 if there is any violation.
+
 ## Extensions that need another extension
 
 Pass the other extension's checkout with `--with`. Repeat it for several, in the order they must be enabled:

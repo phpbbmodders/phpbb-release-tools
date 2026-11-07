@@ -497,6 +497,61 @@ def check_adduser(b: Board) -> None:
         check_adduser_csv(b, admin, sid)
     if b.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'adduser_admin_copy'"):
         check_adduser_admin_copy(b, admin, sid)
+    language = b.root / "ext/phpbbmodders/adduser/language/en/info_acp_adduser.php"
+    if language.is_file() and "ADDUSER_PASSWORD_REQUIRED" in language.read_text():
+        check_adduser_no_email(b, admin, sid, page_url)
+
+
+def check_adduser_no_email(b: Board, admin: requests.Session, sid: str, page_url: str) -> None:
+    """adduser with board email off: a password is required, and the account is active at once.
+
+    Runs with admin activation on, the setting that used to send admins an
+    activation notice for an account that was already active. Restores the
+    settings it changes.
+    """
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'require_activation')"))
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'email_enable'")
+    b.sql("UPDATE phpbb_config SET config_value = '2' WHERE config_name = 'require_activation'")
+    b.purge_cache()
+    try:
+        page = admin.get(page_url).text
+        ok("Board email is disabled" in page and 'name="activate"' not in page,
+           "email off: the page says no email is sent and offers no activation box")
+
+        def add(name: str, password: str) -> str:
+            action, fields = form_fields(admin.get(page_url).text)
+            return post_back(admin, f"{b.base}/adm", page_url, action, {
+                **fields, "username": name, "email": f"{name}@example.com", "new_password": password,
+                "password_confirm": password, "lang": "en", "group": "0", "submit": "Submit"})
+
+        body = add("noemailblank", "")
+        ok("enter a password" in body and not b.sql("SELECT 1 FROM phpbb_users WHERE username_clean = 'noemailblank'"),
+           "email off: a blank password is refused instead of generating one nobody learns")
+        body = add("noemailprobe", "Probe-pw-12345")
+        row = b.sql("SELECT user_id, user_type FROM phpbb_users WHERE username_clean = 'noemailprobe'")
+        ok(row and str(row[0][1]) == "0" and "no email was sent" in body,
+           "email off: the account is created active and the message says no email was sent")
+        if row:
+            notices = b.sql("SELECT 1 FROM phpbb_notifications n JOIN phpbb_notification_types t "
+                            "ON t.notification_type_id = n.notification_type_id "
+                            "WHERE t.notification_type_name = 'notification.type.admin_activate_user' "
+                            "AND n.item_id = ?", (row[0][0],))
+            ok(not notices, "email off: admins get no activation notice for the already active account")
+        mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' "
+                    "AND module_mode = 'csv'")[0][0]
+        csv_url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
+        _, fields = form_fields(admin.get(csv_url).text, "adduser_csv")
+        time.sleep(1.1)
+        r = admin.post(csv_url, data={**fields, "group": "0", "preview": "1"},
+                       files={"csv_file": ("users.csv", b"username,email\nnoemailcsv,noemailcsv@example.com\n",
+                                           "text/csv")}).text
+        ok("this row needs a password" in page_text(r) and "No rows are ready" in page_text(r),
+           "email off: a CSV row without a password is skipped")
+    finally:
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        b.purge_cache()
 
 
 def check_adduser_default_group(b: Board, admin: requests.Session, page_url: str) -> None:
@@ -669,14 +724,14 @@ def check_adduser_csv(b: Board, admin: requests.Session, sid: str) -> None:
         group_id = str(b.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'GLOBAL_MODERATORS'")[0][0])
         csv = ("\ufeffUsername;Email;Password;Lang;Birthday\r\n"
                "csvprobea;csvprobea@example.com;Probe-pass-123;en;05-03-1990\r\n"
-               "csvprobeb;csvprobeb@example.com;;;\r\n"
+               "csvprobeb;csvprobeb@example.com;Probe-pass-123;;\r\n"
                "csvprobeb;csvprobeb2@example.com;;;\r\n"
                "csvprobec;not-an-email;;;\r\n"
                "admin;csvprobeadmin@example.com;;;\r\n"
                "csvprobed;csvprobed@example.com;;;1990-03-05\r\n"
                "csvprobee;csvprobee@example.com;;xx;\r\n"
                ";;;;\r\n"
-               "<i>csvprobex</i>;csvprobex@example.com;;;\r\n").encode()
+               "<i>csvprobex</i>;csvprobex@example.com;Probe-pass-123;;\r\n").encode()
         log_before = int(b.sql("SELECT COUNT(*) FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'")[0][0])
         r = upload(csv, {"group": group_id, "group_default": "1", "default_group": "group"})
         t = page_text(r)
@@ -706,8 +761,8 @@ def check_adduser_csv(b: Board, admin: requests.Session, sid: str) -> None:
            "CSV: sending the same rows again creates nothing")
 
         def rows(n: int) -> bytes:
-            return ("username,email\n" + "".join(
-                f"csvprobebulk{i:03d},csvprobebulk{i:03d}@example.com\n" for i in range(n))).encode()
+            return ("username,email,password\n" + "".join(
+                f"csvprobebulk{i:03d},csvprobebulk{i:03d}@example.com,Probe-pass-123\n" for i in range(n))).encode()
 
         ok("more than 50 rows" in page_text(upload(rows(51))), "CSV: a 51-row file is refused")
         r = upload(rows(50))
