@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
 
       - name: ShellCheck
-        run: shellcheck -x git-extensions.sh git-release-style.sh git-release-langpack.sh lib/github-release.sh lib/release-source.sh tests/test-release-scripts.sh tests/test-release-api.sh phpbb-test-board/setup-board.sh phpbb-test-board/run-unit-tests.sh phpbb-test-board/php-lint.sh phpbb-test-board/db-matrix.sh tests/test-phpbb-test-board.sh tests/test-pr-wait.sh tests/test-normalize-composer.sh tests/test-prune-merged-branches.sh
+        run: shellcheck -x git-extensions.sh git-release-style.sh git-release-langpack.sh lib/github-release.sh lib/release-source.sh tests/test-release-scripts.sh tests/test-release-api.sh phpbb-test-board/setup-board.sh phpbb-test-board/run-unit-tests.sh phpbb-test-board/php-lint.sh phpbb-test-board/run-epv.sh phpbb-test-board/db-matrix.sh tests/test-phpbb-test-board.sh tests/test-pr-wait.sh tests/test-normalize-composer.sh tests/test-prune-merged-branches.sh
 
       - name: Tests
         run: tests/test-release-scripts.sh
