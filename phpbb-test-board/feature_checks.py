@@ -1063,6 +1063,13 @@ def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: st
     try:
         save(str(b.root / "store"))
         ok(config("auto_db_backup_directory") == "", "ACP refuses a directory inside the board")
+        # A real private directory whose path is longer than phpBB's 255-character config column
+        long_dir = b.php(f"$d = '{directory}/' . str_repeat('a', 120) . '/' . str_repeat('b', 120);"
+                         "echo (mkdir($d, 0700, true) && chmod(dirname($d), 0700) ? realpath($d) : '');").strip()
+        if long_dir and len(long_dir) > 255:
+            save(long_dir)
+            ok(config("auto_db_backup_directory") == "", f"ACP refuses a {len(long_dir)}-character directory path")
+            b.php(f"@rmdir('{long_dir}'); @rmdir(dirname('{long_dir}'));")
         save(directory)
         ok(config("auto_db_backup_directory") == directory, "ACP saves a private directory outside the board")
         before = backups()
