@@ -1127,8 +1127,46 @@ def shots_posteripinviewtopic(board: Board, shoot: Shooter, args: argparse.Names
     shoot.shot("posteripinviewtopic-lookup", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True, prepare=look_up)
 
 
+def shots_genders(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/genders: the gender selector, genders on posts and profiles, and the ACP settings.
+
+    Needs a board with posts by several members: run with --seed and
+    seed-forum's bin/seed-standard-fixtures.php. Every member gets a gender,
+    cycling through the first few choices. genders-ucp-profile,
+    genders-viewtopic, genders-profile and genders-acp-settings use the
+    default settings (icon only, User Statistics). genders-viewtopic-text,
+    genders-profile-details and genders-acp-settings-changed show the
+    1.4.0-dev settings: gender text before the icon, the phpBB 3.0 MOD
+    prosilver icon set, and gender in the main profile details.
+    """
+    users = [row[0] for row in board.sql("SELECT user_id FROM phpbb_users WHERE user_type IN (0, 3) ORDER BY user_id")]
+    for n, user_id in enumerate(users):
+        board.sql("UPDATE phpbb_users SET user_gender = ? WHERE user_id = ?", (n % 4 + 1, user_id))
+    board.sql("UPDATE phpbb_users SET user_gender = 2 WHERE user_id = 2")
+    board.purge_cache()
+    _, topic = busiest_forum_and_topic(board)
+    acp = "adm/index.php?i=-phpbbmodders-genders-acp-settings_module&mode=settings&sid={sid}"
+
+    def first_posts(p) -> None:
+        # Keep the title and the first three posts
+        p.add_style_tag(content="#page-body > .post:nth-of-type(n+4) ~ *:not(.action-bar.bar-top),"
+                                "#page-body > .post:nth-of-type(n+4) { display: none; }")
+    shoot.shot("genders-ucp-profile", "ucp.php?i=ucp_profile&mode=profile_info&sid={sid}", admin=True,
+               selector="form#ucp")
+    shoot.shot("genders-viewtopic", f"viewtopic.php?t={topic}", selector="#page-body", prepare=first_posts)
+    shoot.shot("genders-profile", "memberlist.php?mode=viewprofile&u=2&sid={sid}", admin=True, selector="#page-body")
+    shoot.shot("genders-acp-settings", acp, admin=True, full_page=True)
+
+    set_config(board, {"genders_show_text": "1", "genders_icon_set": "prosilver", "genders_profile_details": "1"})
+    shoot.shot("genders-viewtopic-text", f"viewtopic.php?t={topic}", selector="#page-body", prepare=first_posts)
+    shoot.shot("genders-profile-details", "memberlist.php?mode=viewprofile&u=2&sid={sid}", admin=True,
+               selector="#page-body")
+    shoot.shot("genders-acp-settings-changed", acp, admin=True, full_page=True)
+
+
 SHOTS = {
     "phpbbmodders/contactadmin": shots_contactadmin,
+    "phpbbmodders/genders": shots_genders,
     "phpbbmodders/copylinks": shots_copylinks,
     "phpbbmodders/documentation": shots_documentation,
     "phpbbmodders/feedlinks": shots_feedlinks,

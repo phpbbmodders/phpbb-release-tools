@@ -643,7 +643,7 @@ def check_genders(b: Board) -> None:
 
 
 CHECKS = {
-    "rmcgirr83/genders": check_genders,
+    "phpbbmodders/genders": check_genders,
     "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
