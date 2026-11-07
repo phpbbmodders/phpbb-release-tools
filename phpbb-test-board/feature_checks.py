@@ -619,7 +619,31 @@ def check_contactadmin(b: Board) -> None:
     ok(not changed, "saving the settings changed no other setting" + (f": {changed}" if changed else ""))
 
 
+def check_genders(b: Board) -> None:
+    """Exercise the reported profile and UCP paths with the stock board style."""
+    member = requests.Session()
+    sid = b.login(member, acp=True)
+    ucp = f"{b.base}/ucp.php?i=ucp_profile&mode=profile_info&sid={sid}"
+    page = member.get(ucp, timeout=20)
+    action, fields = form_fields(page.text, "ucp")
+    ok(page.ok and 'name="user_gender"' in page.text and "form_token" in fields,
+       "UCP profile displays the gender selector and form token")
+    post_back(member, b.base, ucp, action, {**fields, "user_gender": "2", "submit": "Submit"})
+    saved = b.sql("SELECT user_gender FROM phpbb_users WHERE user_id = 2")
+    ok(saved and str(saved[0][0]) == "2", "UCP saves the selected gender")
+    page = member.get(ucp, timeout=20)
+    ok(re.search(r'<option\s+value="2"\s+selected=', page.text),
+       "UCP displays the saved choice")
+    profile = member.get(f"{b.base}/memberlist.php?mode=viewprofile&u=2", timeout=20)
+    ok(profile.ok and 'class="fa fa-venus"' in profile.text, "member profile displays the saved gender icon")
+    preview = member.get(f"{b.base}/{b.route('gender_id/2')}", timeout=20)
+    ok(preview.ok and preview.json().get("gender") == "fa-venus", "gender preview route returns the correct icon")
+    acp = member.get(f"{b.base}/adm/index.php?i=users&mode=profile&u=2&sid={sid}", timeout=20)
+    ok(acp.ok and 'name="user_gender"' in acp.text, "ACP user profile displays the gender selector")
+
+
 CHECKS = {
+    "phpbbmodders/genders": check_genders,
     "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
