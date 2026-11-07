@@ -14,6 +14,7 @@ Test users get random throwaway passwords that are never printed.
 Exit status: 0 if every check passed, 1 if any failed, 2 for bad arguments.
 """
 import argparse
+import hashlib
 import json
 import re
 import secrets
@@ -930,7 +931,104 @@ def check_genders(b: Board) -> None:
     ok(acp.ok and 'name="user_gender"' in acp.text, "ACP user profile displays the gender selector")
 
 
+def check_autodbbackup(b: Board) -> None:
+    """Save the ACP settings, run the backup cron three times and check retention and ACP Restore."""
+    marker = "picoautodbbackup"  # kept by phpbbmodders/autodbbackup so older backups are still pruned
+    on_storage = getattr(b, "version", "").startswith("4.")  # phpBB 4.0 keeps backups in its storage and backups table
+
+    def backups() -> list:
+        """Names of the backups phpBB knows about: the backups table on 4.0, store/ files on 3.3."""
+        if on_storage:
+            return sorted(r[0] for r in b.sql("SELECT filename FROM phpbb_backups"))
+        out = b.php("foreach (glob($phpbb_root_path . 'store/backup_*') as $f) { echo basename($f), \"\\n\"; }")
+        return sorted(line for line in out.splitlines() if line.startswith("backup_"))
+
+    def config(name: str) -> str:
+        rows = b.sql("SELECT config_value FROM phpbb_config WHERE config_name = ?", (name,))
+        return rows[0][0] if rows else ""
+
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%autodbbackup%' "
+                "AND module_mode = 'settings'")
+    ok(mid, "ACP module is installed")
+    if not mid:
+        return
+    page_url = f"{b.base}/adm/index.php?i={mid[0][0]}&sid={sid}"
+    page = admin.get(page_url, timeout=20)
+    ok(page.ok and 'id="acp_auto_db_backup"' in page.text and "BUY_ME" not in page.text,
+       "ACP settings page loads")
+
+    # On MySQL and MariaDB the cron also optimizes fragmented tables first
+    optimize = "1" if isinstance(b, SeedBoard) and board_database(b) in ("mysql", "mariadb") else "0"
+    # Two hours from now, on the board's own clock
+    when = json.loads(b.php("echo json_encode(getdate(time() + 7200));"))
+    action, fields = form_fields(page.text, "acp_auto_db_backup")
+    body = post_back(admin, f"{b.base}/adm", page_url, action, {
+        **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "text",
+        "auto_db_backup_optimize": optimize, "auto_db_backup_gc": "2", "auto_db_backup_gc_unit": "hours",
+        "auto_db_backup_copies": "2", "auto_db_backup_day": str(when["mday"]),
+        "auto_db_backup_month": str(when["mon"]), "auto_db_backup_year": str(when["year"]),
+        "auto_db_backup_hour": str(when["hours"]), "auto_db_backup_minute": str(when["minutes"]),
+        "submit": "Submit"})
+    ok("Settings changed" in body or "settings changed" in body.lower(), "ACP saves the settings")
+    saved = {k: config(f"auto_db_backup_{k}") for k in ("enable", "gc", "gc_unit", "copies", "optimize")}
+    ok(saved == {"enable": "1", "gc": "7200", "gc_unit": "hours", "copies": "2", "optimize": optimize},
+       f"settings stored: {saved}")
+
+    # A backup due in January must be selectable in December: next year is offered
+    page = admin.get(page_url, timeout=20)
+    ok(f'<option value="{when["year"] + 1}"' in page.text, "the next backup time offers next year too")
+    # A file type the server can't write is refused and leaves the setting alone
+    action, fields = form_fields(page.text, "acp_auto_db_backup")
+    post_back(admin, f"{b.base}/adm", page_url, action, {
+        **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "zip",
+        "auto_db_backup_gc": "2", "auto_db_backup_gc_unit": "hours", "auto_db_backup_copies": "2",
+        "auto_db_backup_day": str(when["mday"]), "auto_db_backup_month": str(when["mon"]),
+        "auto_db_backup_year": str(when["year"]), "auto_db_backup_hour": str(when["hours"]),
+        "auto_db_backup_minute": str(when["minutes"]), "submit": "Submit"})
+    ok(config("auto_db_backup_filetype") == "text", "an unknown file type is refused")
+
+    # A manual backup that retention must leave alone
+    manual = "backup_1700000000_manualprobe00000000.sql"
+    if on_storage:
+        b.php(f"$s = $phpbb_container->get('storage.backup'); $s->write('{manual}', fopen('php://memory', 'rb'));"
+              f"$db->sql_query('INSERT INTO ' . BACKUPS_TABLE . \" (filename) VALUES ('{manual}')\");", check=True)
+    else:
+        b.php(f"file_put_contents($phpbb_root_path . 'store/{manual}', '-- probe');", check=True)
+
+    task = "phpbbmodders.autodbbackup.cron.task.auto_db_backup"
+    for run in range(3):
+        b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_last_gc'")
+        b.purge_cache()
+        out = b.cli("cron:run", task)
+        ok("rror" not in out, f"cron run {run + 1} finished" + ("" if "rror" not in out else f": {out[-200:]}"))
+        time.sleep(1.1)  # a new second, so each backup's timestamp differs
+    auto = [f for f in backups() if marker in f]
+    ok(len(auto) == 2, f"retention keeps the newest 2 automatic backups ({len(auto)} left)")
+    ok(manual in backups(), "the manual backup is kept")
+    ok(int(config("auto_db_backup_last_gc")) > 0, "the next backup time moved on after the run")
+    logs = b.sql("SELECT COUNT(log_id) FROM phpbb_log WHERE log_operation = 'LOG_AUTO_DB_BACKUP'")
+    ok(logs and int(logs[0][0]) >= 3, "each run is logged in the admin log")
+
+    restore = admin.get(f"{b.base}/adm/index.php?i=acp_database&mode=restore&sid={sid}", timeout=20)
+    # ACP Restore lists each backup by the SHA-1 of its file name
+    ok(restore.ok and all(f'value="{hashlib.sha1(f.encode()).hexdigest()}"' in restore.text for f in auto),
+       "ACP Restore lists the automatic backups")
+
+    # Leave the board as it was: remove the probe and the backups this check made
+    for name in auto + [manual]:
+        if on_storage:
+            b.php(f"$phpbb_container->get('storage.backup')->delete('{name}');"
+                  f"$db->sql_query('DELETE FROM ' . BACKUPS_TABLE . \" WHERE filename = '{name}'\");")
+        else:
+            b.php(f"@unlink($phpbb_root_path . 'store/{name}');")
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_enable'")
+    b.purge_cache()
+
+
 CHECKS = {
+    "phpbbmodders/autodbbackup": check_autodbbackup,
     "phpbbmodders/genders": check_genders,
     "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,

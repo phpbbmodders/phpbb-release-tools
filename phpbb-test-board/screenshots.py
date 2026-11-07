@@ -1202,8 +1202,33 @@ def shots_adduser(board: Board, shoot: Shooter, args: argparse.Namespace) -> Non
                selector='fieldset:has(input[name="config[adduser_admin_copy]"])')
 
 
+def shots_autodbbackup(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/autodbbackup: the ACP settings and its backups in ACP Restore.
+
+    autodbbackup-acp-settings shows daily gzip backups keeping seven copies.
+    autodbbackup-acp-restore is phpBB's Restore page after the backup cron
+    has run twice; the backups it made are deleted afterwards.
+    """
+    set_config(board, {"auto_db_backup_enable": "1", "auto_db_backup_filetype": "gzip",
+                       "auto_db_backup_gc": "86400", "auto_db_backup_gc_unit": "days",
+                       "auto_db_backup_copies": "7"})
+    acp = "adm/index.php?i=-phpbbmodders-autodbbackup-acp-auto_db_backup_module&mode=settings&sid={sid}"
+    shoot.shot("autodbbackup-acp-settings", acp, admin=True, full_page=True)
+
+    before = set((board.root / "store").glob("backup_*"))
+    for _ in range(2):
+        board.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_last_gc'")
+        board.purge_cache()
+        board.cli("cron:run", "phpbbmodders.autodbbackup.cron.task.auto_db_backup")
+        time.sleep(1.1)  # a new second, so the two backups get different times
+    shoot.cleanup.extend(set((board.root / "store").glob("backup_*")) - before)
+    shoot.shot("autodbbackup-acp-restore", "adm/index.php?i=acp_database&mode=restore&sid={sid}", admin=True,
+               selector="#main")
+
+
 SHOTS = {
     "phpbbmodders/adduser": shots_adduser,
+    "phpbbmodders/autodbbackup": shots_autodbbackup,
     "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/genders": shots_genders,
     "phpbbmodders/copylinks": shots_copylinks,
