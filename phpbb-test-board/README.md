@@ -69,6 +69,18 @@ Runs `php -l` on every PHP file under each PHP version (default 7.4 and 8.4), in
 
 Exit status: 0 when every file passes on every version, 1 when a file fails or Docker fails, 2 for bad arguments. The first run of a version pulls its image.
 
+### `run-epv.sh`: EPV the way CI fails on it
+
+```bash
+phpbb-test-board/run-epv.sh path/to/extension [-b 3.3.x|master] [-u]
+```
+
+Runs EPV (phpBB's Extension Pre Validator) as the phpbbmodders reusable workflow (`phpbbmodders/.github`, `epv.yml`) does in CI, and fails the same way: on every Fatal or Error finding the extension does not list in `.github/epv-allowed.txt`. EPV itself exits 0 on Error findings, so running it by hand misses what fails CI. Allowed findings that no longer occur are listed so they can be removed. It needs no board.
+- **The checkout** is set up on first use in `~/.cache/phpbb-release-tools/epv-BRANCH` (or `--env DIR`, or `PHPBB_EPV_ENV`): a shallow clone of phpBB with EPV installed through phpBB's own `composer.phar` (`dev-master`, or `dev-epv-phpbb4` for `master`, as CI does). `--update` pulls it and reinstalls EPV.
+- **The extension** is copied in afresh on every run, as the only extension under `phpBB/ext/`, and EPV is pointed at that folder, as CI does.
+
+Exit status: 0 when nothing would fail CI, 1 when a finding would or setup fails, 2 for bad arguments. Needs `git`, `php`, `rsync` and `jq`.
+
 ### `smoke_test.py`: does the extension break anything?
 
 ```bash

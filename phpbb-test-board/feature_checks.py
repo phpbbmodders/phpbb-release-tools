@@ -490,6 +490,113 @@ def check_adduser(b: Board) -> None:
         ok(b.sql("SELECT 1 FROM phpbb_user_group WHERE user_id = ? AND group_id = 4", (row[0][0],)),
            "the user was added to the chosen group (Global moderators)")
     ok(b.sql("SELECT 1 FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'"), "the new account was logged")
+    if b.sql("SELECT 1 FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode = 'csv'"):
+        check_adduser_csv(b, admin, sid)
+
+
+def page_text(html: str) -> str:
+    """Visible text of a page, whitespace collapsed, for matching messages."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+
+
+def check_adduser_csv(b: Board, admin: requests.Session, sid: str) -> None:
+    """adduser's "Add users from CSV" page: upload, check rows, create, summary.
+
+    Runs with board email off (no mail is sent) and restores the settings it
+    changes. The 50-row run guards against PHP's time limit: hashing each
+    password with phpBB's default algorithm is slow on purpose.
+    """
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'require_activation', 'allow_birthdays')"))
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name IN ('email_enable', 'require_activation')")
+    b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'allow_birthdays'")
+    b.purge_cache()
+    try:
+        mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' "
+                    "AND module_mode = 'csv'")[0][0]
+        url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
+        page = admin.get(url).text
+        _, fields = form_fields(page, "adduser_csv")
+        ok('enctype="multipart/form-data"' in page and "form_token" in fields,
+           "CSV upload form takes a file and carries a form token")
+
+        def upload(content: bytes, extra: dict = None) -> str:
+            time.sleep(1.1)
+            data = {**fields, "group": "0", "preview": "1", **(extra or {})}
+            return admin.post(url, data=data, files={"csv_file": ("users.csv", content, "text/csv")}).text
+
+        def confirm(data: dict) -> str:
+            time.sleep(1.1)
+            return admin.post(url, data={**data, "create": "1"}).text
+
+        def count_csv_users() -> int:
+            return int(b.sql("SELECT COUNT(*) FROM phpbb_users WHERE username_clean LIKE 'csvprobe%' "
+                             "OR username_clean LIKE '%csvprobex%'")[0][0])
+
+        r = upload(b"username,email,<b>phone</b>\n")
+        ok("&lt;b&gt;phone" in r and "<b>phone</b>" not in r,
+           "CSV: an unknown column is reported, its name escaped")
+        time.sleep(1.1)
+        ok("Choose a CSV file" in page_text(admin.post(url, data={**fields, "preview": "1"}).text),
+           "CSV: a missing file is reported")
+
+        group_id = str(b.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'GLOBAL_MODERATORS'")[0][0])
+        csv = ("\ufeffUsername;Email;Password;Lang;Birthday\r\n"
+               "csvprobea;csvprobea@example.com;Probe-pass-123;en;05-03-1990\r\n"
+               "csvprobeb;csvprobeb@example.com;;;\r\n"
+               "csvprobeb;csvprobeb2@example.com;;;\r\n"
+               "csvprobec;not-an-email;;;\r\n"
+               "admin;csvprobeadmin@example.com;;;\r\n"
+               "csvprobed;csvprobed@example.com;;;1990-03-05\r\n"
+               "csvprobee;csvprobee@example.com;;xx;\r\n"
+               ";;;;\r\n"
+               "<i>csvprobex</i>;csvprobex@example.com;;;\r\n").encode()
+        log_before = int(b.sql("SELECT COUNT(*) FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'")[0][0])
+        r = upload(csv, {"group": group_id, "group_default": "1"})
+        t = page_text(r)
+        ok("3 rows are ready" in t and "5 rows are skipped" in t,
+           "CSV check page: 3 rows ready, 5 skipped (semicolons, byte order mark, header in title case)")
+        ok("The same username is on row 3" in t, "CSV check page: duplicate username in the file reported")
+        ok("DD-MM-YYYY" in t and "The language you specified is not valid" in t,
+           "CSV check page: wrong birthday format and unknown language reported")
+        ok("&lt;i&gt;csvprobex&lt;/i&gt;" in r and "<i>csvprobex</i>" not in r,
+           "CSV check page: markup in a username is escaped")
+        ok("Probe-pass-123" not in r, "CSV check page: no plaintext password in the page")
+        ok(count_csv_users() == 0, "CSV: checking creates nothing")
+
+        _, create = form_fields(r, "adduser_csv_create")
+        bad = confirm({**create, "csv_hash": "0" * 64})
+        ok("were changed or are incomplete" in page_text(bad) and count_csv_users() == 0,
+           "CSV: a tampered payload is refused and creates nothing")
+        t = page_text(confirm(create))
+        ok("3 accounts were created" in t and "5 rows are skipped" in t, "CSV summary: 3 created, 5 skipped")
+        ok(count_csv_users() == 3, "CSV: exactly the 3 ready accounts exist")
+        alice = b.sql("SELECT user_id, user_birthday, group_id FROM phpbb_users WHERE username_clean = 'csvprobea'")
+        ok(alice and alice[0][1].replace(" ", "") == "5-3-1990" and str(alice[0][2]) == group_id,
+           "CSV: birthday stored and the chosen group made the default group")
+        log_after = int(b.sql("SELECT COUNT(*) FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'")[0][0])
+        ok(log_after - log_before == 3, "CSV: each created account was logged")
+        ok("No accounts were created" in page_text(confirm(create)),
+           "CSV: sending the same rows again creates nothing")
+
+        def rows(n: int) -> bytes:
+            return ("username,email\n" + "".join(
+                f"csvprobebulk{i:03d},csvprobebulk{i:03d}@example.com\n" for i in range(n))).encode()
+
+        ok("more than 50 rows" in page_text(upload(rows(51))), "CSV: a 51-row file is refused")
+        r = upload(rows(50))
+        _, create = form_fields(r, "adduser_csv_create")
+        ok("50 rows are ready" in page_text(r) and "50 accounts were created" in page_text(confirm(create)),
+           "CSV: a full 50-row file is checked and created within PHP's time limit")
+    finally:
+        ids = [str(row[0]) for row in b.sql("SELECT user_id FROM phpbb_users WHERE username_clean LIKE "
+                                            "'csvprobe%' OR username_clean LIKE '%csvprobex%'")]
+        if ids:
+            b.sql(f"DELETE FROM phpbb_user_group WHERE user_id IN ({','.join(ids)})")
+            b.sql(f"DELETE FROM phpbb_users WHERE user_id IN ({','.join(ids)})")
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        b.purge_cache()
 
 
 def check_sfscompanion(b: Board) -> None:
