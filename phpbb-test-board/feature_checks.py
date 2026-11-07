@@ -477,9 +477,10 @@ def check_honeypot(b: Board) -> None:
 def check_adduser(b: Board) -> None:
     admin = requests.Session()
     sid = b.login(admin, acp=True)
-    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode <> ''")[0][0]
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode = 'main'")[0][0]
     page_url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
-    action, fields = form_fields(admin.get(page_url).text)
+    page = admin.get(page_url).text
+    action, fields = form_fields(page)
     ok("form_token" in fields, "Add User form carries a form token")
     post_back(admin, f"{b.base}/adm", page_url, action, {
         **fields, "username": "addedprobe", "email": "addedprobe@example.com", "new_password": "Probe-pw-12345",
@@ -490,8 +491,133 @@ def check_adduser(b: Board) -> None:
         ok(b.sql("SELECT 1 FROM phpbb_user_group WHERE user_id = ? AND group_id = 4", (row[0][0],)),
            "the user was added to the chosen group (Global moderators)")
     ok(b.sql("SELECT 1 FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'"), "the new account was logged")
+    if 'name="default_group"' in page:
+        check_adduser_default_group(b, admin, page_url)
     if b.sql("SELECT 1 FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode = 'csv'"):
         check_adduser_csv(b, admin, sid)
+    if b.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'adduser_admin_copy'"):
+        check_adduser_admin_copy(b, admin, sid)
+
+
+def check_adduser_default_group(b: Board, admin: requests.Session, page_url: str) -> None:
+    """adduser's default-group choice: Registered users, Newly registered users or the chosen group.
+
+    Runs with board email off and the new-member post limit on, and restores
+    the settings it changes.
+    """
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'new_member_post_limit', 'new_member_group_default')"))
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'email_enable'")
+    b.sql("UPDATE phpbb_config SET config_value = '3' WHERE config_name = 'new_member_post_limit'")
+    try:
+        groups = dict(b.sql("SELECT group_name, group_id FROM phpbb_groups WHERE group_name IN "
+                            "('REGISTERED', 'NEWLY_REGISTERED', 'GLOBAL_MODERATORS')"))
+
+        def add(name: str, extra: dict) -> str:
+            page = admin.get(page_url).text
+            action, fields = form_fields(page)
+            return post_back(admin, f"{b.base}/adm", page_url, action, {
+                **fields, "username": name, "email": f"{name}@example.com", "new_password": "Probe-pw-12345",
+                "password_confirm": "Probe-pw-12345", "lang": "en", "group": "0", "new_user": "0",
+                "submit": "Submit", **extra})
+
+        def default_of(name: str) -> str:
+            row = b.sql("SELECT group_id FROM phpbb_users WHERE username_clean = ?", (name,))
+            return str(row[0][0]) if row else ""
+
+        for setting, expected in (("0", "registered"), ("1", "newly_registered")):
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'new_member_group_default'",
+                  (setting,))
+            b.purge_cache()
+            page = admin.get(page_url).text
+            ok(re.search(r'value="%s"[^>]*checked' % expected, page),
+               f"default group starts out as {expected} when the board's NRU-default setting is {setting}")
+
+        add("dgprobenru", {"default_group": "newly_registered"})
+        new = b.sql("SELECT user_new FROM phpbb_users WHERE username_clean = 'dgprobenru'")
+        ok(default_of("dgprobenru") == str(groups["NEWLY_REGISTERED"]) and new and str(new[0][0]) == "1",
+           "Newly registered users as default: set, and the account marked as a new user")
+        add("dgprobereg", {"default_group": "registered", "new_user": "1"})
+        ok(default_of("dgprobereg") == str(groups["REGISTERED"]),
+           "Registered users as default wins over the board's NRU-default setting")
+        add("dgprobegrp", {"default_group": "group", "group": str(groups["GLOBAL_MODERATORS"])})
+        ok(default_of("dgprobegrp") == str(groups["GLOBAL_MODERATORS"]), "the chosen group as default")
+        r = add("dgprobenone", {"default_group": "group"})
+        ok("Choose a group above" in page_text(r) and not default_of("dgprobenone"),
+           "the chosen group as default without a group is refused")
+    finally:
+        ids = [str(row[0]) for row in b.sql("SELECT user_id FROM phpbb_users WHERE username_clean LIKE 'dgprobe%'")]
+        if ids:
+            b.sql(f"DELETE FROM phpbb_user_group WHERE user_id IN ({','.join(ids)})")
+            b.sql(f"DELETE FROM phpbb_users WHERE user_id IN ({','.join(ids)})")
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        b.purge_cache()
+
+
+def check_adduser_admin_copy(b: Board, admin: requests.Session, sid: str) -> None:
+    """adduser's administrator copy of welcome emails, through the CSV page.
+
+    Board email goes to phpBB's queue (email_package_size on), so nothing is
+    sent and the queued emails can be read from the queue file, which is
+    emptied first and restored afterwards.
+    """
+    registration = admin.get(f"{b.base}/adm/index.php?i=acp_board&mode=registration&sid={sid}").text
+    ok('name="config[adduser_admin_copy]"' in registration,
+       "admin copy setting shown in ACP > Board settings > User registration settings")
+    queue = b.root / "cache" / "production" / "queue.php"
+    if not queue.parent.is_dir():
+        queue = b.root / "cache" / "queue.php"
+    saved_queue = queue.read_bytes() if queue.exists() else None
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'email_package_size', 'require_activation', 'adduser_admin_copy')"))
+    b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'email_enable'")
+    b.sql("UPDATE phpbb_config SET config_value = '20' WHERE config_name = 'email_package_size'")
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'require_activation'")
+    admin_email = b.sql("SELECT user_email FROM phpbb_users WHERE username_clean = 'admin'")[0][0]
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode = 'csv'")[0][0]
+    url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
+
+    def create(rows: str) -> str:
+        queue.unlink(missing_ok=True)
+        _, fields = form_fields(admin.get(url).text, "adduser_csv")
+        time.sleep(1.1)
+        r = admin.post(url, data={**fields, "group": "0", "preview": "1"},
+                       files={"csv_file": ("users.csv", ("username,email\n" + rows).encode(), "text/csv")}).text
+        _, create_fields = form_fields(r, "adduser_csv_create")
+        time.sleep(1.1)
+        admin.post(url, data={**create_fields, "create": "1"})
+        return queue.read_text(errors="replace") if queue.exists() else ""
+
+    try:
+        for value, label in (("0", "off"), ("1", "on")):
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'adduser_admin_copy'", (value,))
+            b.purge_cache()
+            n = 2 if value == "1" else 1
+            rows = "".join(f"copyprobe{label}{i},copyprobe{label}{i}@example.com\n" for i in range(n))
+            text = create(rows)
+            copies = text.count("Accounts created on")
+            if value == "0":
+                ok("copyprobeoff0@example.com" in text and copies == 0,
+                   "admin copy off: the welcome email is queued, no copy")
+                continue
+            ok(copies == 1 and admin_email in text, "admin copy on: one copy for the whole file, to the admin")
+            body = re.search(r"This is your copy.*?not included in this copy", text, re.S)
+            ok(body and "copyprobeon0" in body.group(0) and "copyprobeon1" in body.group(0),
+               "admin copy lists every created account")
+            ok(body and "reset_password" not in body.group(0) and "mode=activate" not in body.group(0),
+               "admin copy has no set-password or activation link")
+    finally:
+        ids = [str(row[0]) for row in b.sql("SELECT user_id FROM phpbb_users WHERE username_clean LIKE 'copyprobe%'")]
+        if ids:
+            b.sql(f"DELETE FROM phpbb_user_group WHERE user_id IN ({','.join(ids)})")
+            b.sql(f"DELETE FROM phpbb_users WHERE user_id IN ({','.join(ids)})")
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        queue.unlink(missing_ok=True)
+        if saved_queue is not None:
+            queue.write_bytes(saved_queue)
+        b.purge_cache()
 
 
 def page_text(html: str) -> str:
@@ -552,7 +678,7 @@ def check_adduser_csv(b: Board, admin: requests.Session, sid: str) -> None:
                ";;;;\r\n"
                "<i>csvprobex</i>;csvprobex@example.com;;;\r\n").encode()
         log_before = int(b.sql("SELECT COUNT(*) FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'")[0][0])
-        r = upload(csv, {"group": group_id, "group_default": "1"})
+        r = upload(csv, {"group": group_id, "group_default": "1", "default_group": "group"})
         t = page_text(r)
         ok("3 rows are ready" in t and "5 rows are skipped" in t,
            "CSV check page: 3 rows ready, 5 skipped (semicolons, byte order mark, header in title case)")
