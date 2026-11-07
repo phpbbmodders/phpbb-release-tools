@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _venv import ensure_venv  # noqa: E402
@@ -1023,8 +1024,65 @@ def check_autodbbackup(b: Board) -> None:
                   f"$db->sql_query('DELETE FROM ' . BACKUPS_TABLE . \" WHERE filename = '{name}'\");")
         else:
             b.php(f"@unlink($phpbb_root_path . 'store/{name}');")
+    if b.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'auto_db_backup_directory'"):
+        check_autodbbackup_directory(b, admin, page_url, when, task, marker, backups, config)
     b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_enable'")
     b.purge_cache()
+
+
+def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: str, when: dict, task: str,
+                                 marker: str, backups: Callable, config: Callable) -> None:
+    """autodbbackup's optional private backup directory: ACP validation, cron writes there, retention, refusal."""
+    def save(directory: str) -> None:
+        action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_auto_db_backup")
+        post_back(admin, f"{b.base}/adm", page_url, action, {
+            **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "text",
+            "auto_db_backup_optimize": "0", "auto_db_backup_gc": "2", "auto_db_backup_gc_unit": "hours",
+            "auto_db_backup_copies": "2", "auto_db_backup_directory": directory,
+            "auto_db_backup_day": str(when["mday"]), "auto_db_backup_month": str(when["mon"]),
+            "auto_db_backup_year": str(when["year"]), "auto_db_backup_hour": str(when["hours"]),
+            "auto_db_backup_minute": str(when["minutes"]), "submit": "Submit"})
+
+    def custom_files(directory: str) -> list:
+        out = b.php(f"foreach (glob('{directory}/backup_*') as $f) {{ echo basename($f), \"\\n\"; }}")
+        return sorted(line for line in out.splitlines() if marker in line)
+
+    def run_cron(times: int) -> None:
+        for _ in range(times):
+            b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_last_gc'")
+            b.purge_cache()
+            b.cli("cron:run", task)
+            time.sleep(1.1)
+
+    # A private directory the PHP process owns, outside the board and any web root
+    directory = b.php("$d = sys_get_temp_dir() . '/adb-check-' . bin2hex(random_bytes(4));"
+                      "echo (mkdir($d, 0700) ? realpath($d) : '');").strip()
+    ok(directory, f"made a private test directory ({directory})")
+    if not directory:
+        return
+    try:
+        save(str(b.root / "store"))
+        ok(config("auto_db_backup_directory") == "", "ACP refuses a directory inside the board")
+        save(directory)
+        ok(config("auto_db_backup_directory") == directory, "ACP saves a private directory outside the board")
+        before = backups()
+        run_cron(3)
+        ok(len(custom_files(directory)) == 2, f"backups go to the custom directory, newest 2 kept "
+                                              f"({len(custom_files(directory))} there)")
+        ok(backups() == before, "no backup is left in phpBB's own backup location")
+        # Opened to other users: refused at run time, logged, nothing written
+        b.php(f"chmod('{directory}', 0777);", check=True)
+        failed = int(b.sql("SELECT COUNT(log_id) FROM phpbb_log "
+                           "WHERE log_operation = 'LOG_AUTO_DB_BACKUP_DIRECTORY_FAILED'")[0][0])
+        kept = custom_files(directory)
+        run_cron(1)
+        ok(int(b.sql("SELECT COUNT(log_id) FROM phpbb_log "
+                     "WHERE log_operation = 'LOG_AUTO_DB_BACKUP_DIRECTORY_FAILED'")[0][0]) == failed + 1
+           and custom_files(directory) == kept, "a directory open to other users is refused and logged")
+    finally:
+        b.sql("UPDATE phpbb_config SET config_value = '' WHERE config_name = 'auto_db_backup_directory'")
+        b.php(f"array_map('unlink', glob('{directory}/*')); @rmdir('{directory}');")
+        b.purge_cache()
 
 
 CHECKS = {
