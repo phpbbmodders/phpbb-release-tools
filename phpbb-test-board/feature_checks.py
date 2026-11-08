@@ -1191,7 +1191,140 @@ def check_elonw(b: Board) -> None:
             ok("elonw.js" not in admin.get(topic_url, timeout=20).text, "turning it off removes the script")
 
 
+def check_seenotes(b: Board) -> None:
+    """Set up a reason, give it to a member with BBCode notes, and check who sees the reason line where."""
+    poster = b.sql("SELECT p.post_id, p.topic_id, p.poster_id, u.username FROM phpbb_posts p "
+                   "JOIN phpbb_users u ON u.user_id = p.poster_id WHERE p.poster_id NOT IN (1, 2) "
+                   "AND p.post_visibility = 1 ORDER BY p.post_id")
+    ok(poster, "the board has a post by a member other than the admin")
+    if not poster:
+        return
+    post_id, topic_id, member_id, member_name = poster[0]
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    acp = f"{b.base}/adm/index.php?i=-phpbbmodders-seenotes-acp-main_module&sid={sid}"
+
+    # ACP: settings, then a reason; a missing description is refused while required
+    page_url = f"{acp}&mode=settings"
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_settings")
+    post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "seenotes_label": "STAFF NOTE",
+              "seenotes_require_description": "1", "seenotes_allow_hard_delete": "1", "submit": "Submit"})
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name LIKE 'seenotes_%'"))
+    ok(saved.get("seenotes_label") == "STAFF NOTE" and saved.get("seenotes_allow_hard_delete") == "1",
+       "the ACP settings are saved")
+    title = "Queue " + secrets.token_hex(3)
+    page_url = f"{acp}&mode=reasons&action=add"
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_reason")
+    body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "reason_title": title,
+                     "reason_description": "", "reason_color": "#0055aa", "submit": "Submit"})
+    ok("Enter a description" in body and not b.sql("SELECT 1 FROM phpbb_seenotes_reasons WHERE reason_title = ?",
+                                                    (title,)), "a reason without the required description is refused")
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_reason")
+    post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "reason_title": title,
+              "reason_description": "Approve first", "reason_color": "#0055aa", "submit": "Submit"})
+    reason = b.sql("SELECT reason_id, reason_color FROM phpbb_seenotes_reasons WHERE reason_title = ?", (title,))
+    ok(reason and reason[0][1] == "0055AA", "the ACP adds a reason with its color")
+    if not reason:
+        return
+    reason_id = reason[0][0]
+
+    # MCP: give the member the reason, then write a note with a quote
+    mcp = (f"{b.base}/mcp.php?i=-phpbbmodders-seenotes-mcp-main_module&mode=notes&u={member_id}&sid={sid}")
+    action, fields = form_fields(admin.get(mcp, timeout=20).text, "seenotes-add-entry")
+    post_back(admin, b.base, mcp, action, {**fields, "reason_id": str(reason_id), "entry_current": "1"})
+    entry = b.sql("SELECT entry_id, entry_current FROM phpbb_seenotes_entries WHERE user_id = ? AND reason_id = ?",
+                  (member_id, reason_id))
+    ok(entry and str(entry[0][1]) == "1", "the MCP gives the member the reason as current")
+    if not entry:
+        return
+    entry_id = entry[0][0]
+    page = admin.get(mcp, timeout=20).text
+    ok('id="message"' in page and "bbstyle(" in page, "the note form has the BBCode buttons")
+    action, fields = form_fields(page, "postform")
+    note = '[quote="admin"]Please stop double posting.[/quote]Sent as a PM.'
+    post_back(admin, b.base, mcp, action, {**fields, "entry_id": str(entry_id), "message": note,
+              "submit_note": "Save note"})
+    stored = b.sql("SELECT note_id, note_text FROM phpbb_seenotes_notes WHERE entry_id = ?", (entry_id,))
+    ok(stored and "<QUOTE" in stored[0][1], "the note is stored with its quote parsed")
+    if not stored:
+        return
+    note_id = stored[0][0]
+    page = admin.get(mcp, timeout=20).text
+    ok("<blockquote" in page and "Please stop double posting." in page, "the MCP shows the note's quote")
+
+    # Edit, then the reason line for staff, and not for guests or members
+    edit_url = f"{mcp}&action=edit_note&note_id={note_id}"
+    action, fields = form_fields(admin.get(edit_url, timeout=20).text, "postform")
+    post_back(admin, b.base, edit_url, action, {**fields, "message": note + " Edited.", "submit_note": "Save note"})
+    edited = b.sql("SELECT note_edit_user_name FROM phpbb_seenotes_notes WHERE note_id = ?", (note_id,))
+    ok(edited and edited[0][0] == "admin", "editing a note records who edited it")
+    pages = {
+        "the topic page": f"{b.base}/viewtopic.php?t={topic_id}",
+        "the profile": f"{b.base}/memberlist.php?mode=viewprofile&u={member_id}",
+        "the MCP post details": f"{b.base}/mcp.php?i=main&mode=post_details&p={post_id}&sid={sid}",
+        "the MCP topic view": f"{b.base}/mcp.php?i=main&mode=topic_view&t={topic_id}&sid={sid}",
+    }
+    for where, url in pages.items():
+        html = admin.get(url, timeout=20).text
+        ok("STAFF NOTE" in html and title in html and "(1)" in html, f"staff see the reason line on {where}")
+    password = "Pw-" + secrets.token_hex(8)
+    viewer_name = "seenotes_viewer_" + secrets.token_hex(3)
+    viewer_id = b.add_user(viewer_name, password)
+    viewer = requests.Session()
+    b.login(viewer, viewer_name, password)
+    for who, session in (("guests", requests.Session()), ("members", viewer)):
+        html = session.get(pages["the topic page"], timeout=20).text + \
+            session.get(pages["the profile"], timeout=20).text
+        ok(title not in html and "STAFF NOTE" not in html, f"{who} do not see the reason line")
+
+    # ACP > Manage users shows the same records
+    users = f"{b.base}/adm/index.php?i=users&mode=seenotes&u={member_id}&sid={sid}"
+    html = admin.get(users, timeout=20).text
+    ok(title in html and "Please stop double posting." in html, "ACP Manage users shows the reasons and notes")
+
+    # Delete the note through the confirm box, then log entries
+    delete_url = f"{mcp}&action=delete_note&note_id={note_id}"
+    action, fields = form_fields(admin.get(delete_url, timeout=20).text, "confirm")
+    post_back(admin, b.base, delete_url, action, {**fields, "confirm": "Yes"})
+    ok(not b.sql("SELECT 1 FROM phpbb_seenotes_notes WHERE note_id = ?", (note_id,)),
+       "deleting a note asks to confirm, then deletes it")
+    logged = {row[0] for row in b.sql("SELECT log_operation FROM phpbb_log WHERE log_operation LIKE 'LOG_SEENOTES_%'")}
+    ok({"LOG_SEENOTES_ENTRY_ADDED", "LOG_SEENOTES_NOTE_ADDED", "LOG_SEENOTES_NOTE_EDITED",
+        "LOG_SEENOTES_NOTE_DELETED", "LOG_SEENOTES_REASON_ADDED"} <= logged, "every change is logged")
+
+    # Deleting a member deletes the records about them
+    b.php(f"$e = $phpbb_container->get('phpbbmodders.seenotes.manager')->add_entry({viewer_id}, {reason_id}, true);"
+          f"user_delete('remove', {viewer_id});", check=True)
+    ok(not b.sql("SELECT 1 FROM phpbb_seenotes_entries WHERE user_id = ?", (viewer_id,)),
+       "deleting a member deletes their entries")
+
+    # Hard delete: two screens, the reason's name typed; a wrong name deletes nothing
+    page_url = f"{acp}&mode=reasons&action=delete&id={reason_id}"
+
+    def delete_with_name(name: str) -> str:
+        """Go through both delete screens, typing a name on the second; return the second screen."""
+        action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_delete")
+        step2 = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "submit": "Continue"})
+        action, fields = form_fields(step2, "acp_seenotes_delete")
+        post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "confirm_name": name, "submit": "Delete"})
+        return step2
+
+    ok('name="confirm_name"' in delete_with_name("wrong"), "the second delete screen asks for the reason's name")
+    ok(b.sql("SELECT 1 FROM phpbb_seenotes_reasons WHERE reason_id = ?", (reason_id,)),
+       "a wrong name deletes nothing")
+    delete_with_name(title)
+    ok(not b.sql("SELECT 1 FROM phpbb_seenotes_reasons WHERE reason_id = ?", (reason_id,))
+       and not b.sql("SELECT 1 FROM phpbb_seenotes_entries WHERE reason_id = ?", (reason_id,)),
+       "typing the name deletes the reason with its entries")
+
+    # Without a current reason, staff see NONE linking to the form that gives one
+    html = admin.get(pages["the profile"], timeout=20).text
+    ok(re.search(r'<a href="[^"]*mode=notes&amp;u=%s[^"]*#seenotes-add-entry"[^>]*>NONE' % member_id, html),
+       "a member without a current reason shows NONE, linking to the Give a reason form")
+
+
 CHECKS = {
+    "phpbbmodders/seenotes": check_seenotes,
     "phpbbmodders/autodbbackup": check_autodbbackup,
     "phpbbmodders/elonw": check_elonw,
     "phpbbmodders/genders": check_genders,
