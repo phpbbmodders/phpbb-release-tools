@@ -1097,8 +1097,103 @@ def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: st
         b.purge_cache()
 
 
+def check_elonw(b: Board) -> None:
+    """Post external and same-site links, then check marking, new windows and the UCP setting in a browser."""
+    # Only this check needs a browser
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout, sync_playwright
+
+    forum = b.sql("SELECT forum_id FROM phpbb_posts WHERE post_id = 1")[0][0]
+    external = "https://example.org/elonw-probe"
+    internal = f"{b.base}/index.php"
+    admin = requests.Session()
+    sid = b.login(admin)
+    page_url = f"{b.base}/posting.php?mode=post&f={forum}&sid={sid}"
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "postform")
+    title = "elonw probe " + secrets.token_hex(4)  # unique, so a rerun on the same board reads its own topic
+    post_back(admin, b.base, page_url, action, {**fields, "subject": title, "post": "Submit",
+                                                "message": f"[url]{external}[/url] and [url]{internal}[/url]"})
+    topic = b.sql("SELECT topic_id FROM phpbb_topics WHERE topic_title = ?", (title,))
+    ok(topic, "the probe topic was posted")
+    if not topic:
+        return
+    topic_url = f"{b.base}/viewtopic.php?t={topic[0][0]}"
+    ok("elonw.js" in requests.get(topic_url, timeout=20).text, "guests get the script by default")
+
+    def external_stub(route) -> None:
+        """Answer every request to another host locally, so nothing leaves the machine."""
+        if route.request.url.startswith(b.base):
+            route.continue_()
+        else:
+            route.fulfill(status=200, content_type="text/html", body="<p>stub</p>")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.route("**/*", external_stub)
+            context.add_cookies([{"name": c.name, "value": c.value, "url": b.base} for c in admin.cookies])
+            page = context.new_page()
+            page.goto(topic_url)
+            ext_link = page.locator(f'.content a[href="{external}"]').first
+            int_link = page.locator(f'.content a[href="{internal}"]').first
+            ok("elonw" in (ext_link.get_attribute("class") or "") and ext_link.get_attribute("title"),
+               "an external link in a post is marked, with a tooltip")
+            hidden = ext_link.locator(".elonw-sr-only")
+            ok(hidden.count() == 1 and hidden.inner_text().strip() == ext_link.get_attribute("title"),
+               "the marked link carries the same text for screen readers")
+            ok("elonw" not in (int_link.get_attribute("class") or ""), "a link to the board itself is not marked")
+            # A script-driven link is left alone, and does not stop later external links (old NotInClass bug)
+            page.evaluate("""() => { const a = document.createElement('a'); a.id = 'elonw-ignored';
+                a.href = 'https://example.net/'; a.className = 'lightbox'; a.textContent = 'x';
+                a.setAttribute('onclick', 'return false'); document.body.appendChild(a); }""")
+            pages_before = len(context.pages)
+            page.click("#elonw-ignored")
+            page.wait_for_timeout(500)
+            ok(len(context.pages) == pages_before and page.url.startswith(topic_url),
+               "a script-driven external link is left alone")
+            try:
+                with context.expect_page(timeout=5000) as popup:
+                    ext_link.click()
+                opened = popup.value.url.startswith(external) and page.url.startswith(topic_url)
+                popup.value.close()
+            except PlaywrightTimeout:
+                opened = False
+                page.goto(topic_url)
+            ok(opened, "an external link opens in a new window, also after a script-driven link was clicked")
+            page.click(f'.content a[href="{internal}"]')
+            page.wait_for_load_state()
+            ok(len(context.pages) == 1 and page.url.startswith(internal),
+               "a link to the board itself opens in the same window")
+        finally:
+            browser.close()
+
+    # The UCP setting: off removes the script, and any other value than 0 is stored as 1
+    ucp = f"{b.base}/ucp.php?i=ucp_prefs&mode=personal&sid={sid}"
+    for value, stored in (("0", "0"), ("-1", "1"), ("1", "1")):
+        page = admin.get(ucp, timeout=20).text
+        if value == "0":
+            ok('name="elonw"' in page, "the UCP shows the setting")
+        action, fields = form_fields(page, "ucp")
+        # Send back every other setting as the form shows it
+        current = {}
+        for name, options in re.findall(r'(?s)<select[^>]*name="([^"]+)"[^>]*>(.*?)</select>', page):
+            chosen = re.search(r'<option[^>]*value="([^"]*)"[^>]*selected', options)
+            if chosen:
+                current[name] = chosen.group(1)
+        current.update(re.findall(r'<input[^>]*type="text"[^>]*name="([^"]+)"[^>]*value="([^"]*)"', page))
+        current.update(re.findall(r'<input[^>]*type="radio"[^>]*name="([^"]+)"[^>]*value="([^"]*)"[^>]*checked', page))
+        # phpBB 3.3 selects the timezone with JavaScript, so the page marks none of them
+        current["tz"] = b.sql("SELECT user_timezone FROM phpbb_users WHERE user_id = 2")[0][0] or "UTC"
+        post_back(admin, b.base, ucp, action, {**fields, **current, "elonw": value, "submit": "Submit"})
+        saved = b.sql("SELECT user_elonw FROM phpbb_users WHERE user_id = 2")
+        ok(saved and str(saved[0][0]) == stored, f"the UCP stores {value} as {stored}")
+        if value == "0":
+            ok("elonw.js" not in admin.get(topic_url, timeout=20).text, "turning it off removes the script")
+
+
 CHECKS = {
     "phpbbmodders/autodbbackup": check_autodbbackup,
+    "phpbbmodders/elonw": check_elonw,
     "phpbbmodders/genders": check_genders,
     "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,
