@@ -1200,6 +1200,9 @@ def check_seenotes(b: Board) -> None:
     if not poster:
         return
     post_id, topic_id, member_id, member_name = poster[0]
+    starters = [row[0] for row in b.sql("SELECT reason_title FROM phpbb_seenotes_reasons ORDER BY reason_order")]
+    ok(starters[:7] == ["Moderation queue", "Spam watch", "Warez", "Conduct", "Possible returning member",
+                        "Staff in contact", "General"], "enabling the extension adds the seven starter reasons")
     admin = requests.Session()
     sid = b.login(admin, acp=True)
     acp = f"{b.base}/adm/index.php?i=-phpbbmodders-seenotes-acp-main_module&sid={sid}"
