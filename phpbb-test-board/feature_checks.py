@@ -1054,8 +1054,13 @@ def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: st
             b.cli("cron:run", task)
             time.sleep(1.1)
 
-    # A private directory the PHP process owns, outside the board and any web root
-    directory = b.php("$d = sys_get_temp_dir() . '/adb-check-' . bin2hex(random_bytes(4));"
+    # A private directory the PHP process owns, outside the board and any web root. On a
+    # seed-forum board it goes in BOARD_ROOT.outside (made by run_seed_board before the
+    # server starts), which board-php.py mounts into MSSQL driver containers; each of
+    # those has its own /tmp.
+    outside = b.root.with_name(b.root.name + ".outside") if isinstance(b, SeedBoard) else None
+    base = f"'{outside}'" if outside is not None and outside.is_dir() else "sys_get_temp_dir()"
+    directory = b.php(f"$d = {base} . '/adb-check-' . bin2hex(random_bytes(4));"
                       "echo (mkdir($d, 0700) ? realpath($d) : '');").strip()
     ok(directory, f"made a private test directory ({directory})")
     if not directory:
@@ -1063,6 +1068,13 @@ def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: st
     try:
         save(str(b.root / "store"))
         ok(config("auto_db_backup_directory") == "", "ACP refuses a directory inside the board")
+        # A real private directory whose path is longer than phpBB's 255-character config column
+        long_dir = b.php(f"$d = '{directory}/' . str_repeat('a', 120) . '/' . str_repeat('b', 120);"
+                         "echo (mkdir($d, 0700, true) && chmod(dirname($d), 0700) ? realpath($d) : '');").strip()
+        if long_dir and len(long_dir) > 255:
+            save(long_dir)
+            ok(config("auto_db_backup_directory") == "", f"ACP refuses a {len(long_dir)}-character directory path")
+            b.php(f"@rmdir('{long_dir}'); @rmdir(dirname('{long_dir}'));")
         save(directory)
         ok(config("auto_db_backup_directory") == directory, "ACP saves a private directory outside the board")
         before = backups()
@@ -1121,8 +1133,15 @@ def run_seed_board(args: argparse.Namespace) -> int:
             ok(False, f"{ext} is not enabled on the board; enable it with seed-forum")
             continue
         if ext in CHECKS:
-            with board.serve():
-                CHECKS[ext](board)
+            # A writable directory outside the board, made before the server starts so
+            # seed-forum's board-php.py mounts it into an MSSQL board's containers too
+            outside = board.root.with_name(board.root.name + ".outside")
+            outside.mkdir(mode=0o700, exist_ok=True)
+            try:
+                with board.serve():
+                    CHECKS[ext](board)
+            finally:
+                shutil.rmtree(outside, ignore_errors=True)
             errors = board.php_errors()
             ok(not errors, "no PHP errors logged" + (f": {errors[0][:200]}" if errors else ""))
         else:

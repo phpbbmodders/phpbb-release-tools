@@ -1208,6 +1208,9 @@ def shots_autodbbackup(board: Board, shoot: Shooter, args: argparse.Namespace) -
     autodbbackup-acp-settings shows daily gzip backups keeping seven copies.
     autodbbackup-acp-restore is phpBB's Restore page after the backup cron
     has run twice; the backups it made are deleted afterwards.
+    autodbbackup-update-settings and -update-directory-error are the
+    11/07/2026 update gallery: a six-hour schedule with a custom backup
+    directory, and the error for a directory inside the board.
     """
     set_config(board, {"auto_db_backup_enable": "1", "auto_db_backup_filetype": "gzip",
                        "auto_db_backup_gc": "86400", "auto_db_backup_gc_unit": "days",
@@ -1224,6 +1227,23 @@ def shots_autodbbackup(board: Board, shoot: Shooter, args: argparse.Namespace) -
     shoot.cleanup.extend(set((board.root / "store").glob("backup_*")) - before)
     shoot.shot("autodbbackup-acp-restore", "adm/index.php?i=acp_database&mode=restore&sid={sid}", admin=True,
                selector="#main")
+
+    # The 11/07/2026 update gallery: an hourly schedule with a custom backup directory,
+    # and the error for a directory inside the board (needs the directory setting)
+    if board.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'auto_db_backup_directory'"):
+        # Last run now, so the next backup time shown is six hours ahead, not in the past
+        set_config(board, {"auto_db_backup_gc": "21600", "auto_db_backup_gc_unit": "hours",
+                           "auto_db_backup_last_gc": str(int(time.time())),
+                           "auto_db_backup_directory": "/var/backups/phpbb"})
+        shoot.shot("autodbbackup-update-settings", acp, admin=True, full_page=True)
+        set_config(board, {"auto_db_backup_directory": ""})
+
+        def public_directory(p) -> None:
+            p.fill("#auto_db_backup_directory", str(board.root / "store"))
+            p.wait_for_timeout(1200)  # phpBB's minimum time before a form may be submitted
+            p.click("#submit")
+            p.locator(".errorbox").wait_for()
+        shoot.shot("autodbbackup-update-directory-error", acp, admin=True, full_page=True, prepare=public_directory)
 
 
 SHOTS = {
