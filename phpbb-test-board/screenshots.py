@@ -1271,8 +1271,9 @@ def shots_autodbbackup(board: Board, shoot: Shooter, args: argparse.Namespace) -
 
 
 def shots_seenotes(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
-    """phpbbmodders/seenotes: the reason line next to a post and on a profile, NONE for a member
-    without a current reason, the MCP post notice, MCP → Moderator notes, and the ACP pages.
+    """phpbbmodders/seenotes: the reason line next to a post and on a profile, the notes button
+    next to a post by a member without a reason, the MCP post notice, MCP → Moderator notes, and
+    the ACP pages.
 
     Needs seed-forum's fixtures: run with --seed and seed-forum's
     bin/seed-standard-fixtures.php; seed-forum's bin/seed-seenotes-fixtures.php,
@@ -1297,8 +1298,11 @@ def shots_seenotes(board: Board, shoot: Shooter, args: argparse.Namespace) -> No
     shoot.shot("seenotes-viewtopic", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True, selector=f"#p{post}")
     shoot.shot("seenotes-profile", f"memberlist.php?mode=viewprofile&u={alex}&sid={{sid}}", admin=True,
                selector="form#viewprofile")
-    shoot.shot("seenotes-profile-none", f"memberlist.php?mode=viewprofile&u={drew}&sid={{sid}}", admin=True,
-               selector="form#viewprofile")
+    drew_post = board.sql("SELECT post_id FROM phpbb_posts WHERE poster_id = ? ORDER BY post_time DESC LIMIT 1",
+                          (drew,))[0][0]
+    drew_topic = board.sql("SELECT topic_id FROM phpbb_posts WHERE post_id = ?", (drew_post,))[0][0]
+    shoot.shot("seenotes-post-button", f"viewtopic.php?t={drew_topic}&sid={{sid}}", admin=True,
+               selector=f"#p{drew_post}")
     shoot.shot("seenotes-mcp-notes", mcp.format(user=alex), admin=True, selector="#page-body")
     shoot.shot("seenotes-mcp-post", f"mcp.php?i=main&mode=post_details&p={post}&sid={{sid}}", admin=True,
                selector="#page-body")

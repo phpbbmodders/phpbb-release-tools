@@ -1279,6 +1279,7 @@ def check_seenotes(b: Board) -> None:
         html = session.get(pages["the topic page"], timeout=20).text + \
             session.get(pages["the profile"], timeout=20).text
         ok(title not in html and "STAFF NOTE" not in html, f"{who} do not see the reason line")
+        ok("seenotes-mcp-main_module" not in html, f"{who} get no notes button or profile link")
 
     # ACP > Manage users shows the same records
     users = f"{b.base}/adm/index.php?i=users&mode=seenotes&u={member_id}&sid={sid}"
@@ -1320,10 +1321,15 @@ def check_seenotes(b: Board) -> None:
        and not b.sql("SELECT 1 FROM phpbb_seenotes_entries WHERE reason_id = ?", (reason_id,)),
        "typing the name deletes the reason with its entries")
 
-    # Without a current reason, staff see NONE linking to the form that gives one
-    html = admin.get(pages["the profile"], timeout=20).text
-    ok(re.search(r'<a href="[^"]*mode=notes&amp;u=%s[^"]*#seenotes-add-entry"[^>]*>NONE' % member_id, html),
-       "a member without a current reason shows NONE, linking to the Give a reason form")
+    # Without a current reason nothing shows, but staff keep the notes button and profile link,
+    # which open the Give a reason form; members and guests get neither
+    topic = admin.get(pages["the topic page"], timeout=20).text
+    profile = admin.get(pages["the profile"], timeout=20).text
+    ok("STAFF NOTE" not in profile, "a member without a current reason shows no reason line")
+    to_form = r'href="[^"]*mode=notes&amp;u=%s[^"]*#seenotes-add-entry"' % member_id
+    ok(re.search(r'<a %s[^>]*class="button button-icon-only"' % to_form, topic),
+       "the notes button next to the member's post opens the Give a reason form")
+    ok(re.search(r'<dd><a %s>' % to_form, profile), "the profile's Moderator notes link opens the Give a reason form")
 
 
 CHECKS = {
