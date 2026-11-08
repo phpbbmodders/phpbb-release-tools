@@ -138,6 +138,8 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/autodbbackup` saves its ACP settings set to daily gzip backups keeping seven, then runs the backup cron twice and saves phpBB's ACP Restore page listing the two backups, which it deletes afterwards.
 
+`phpbbmodders/elonw` rewrites the first post of the busiest topic to hold an external link and a link to the board itself, then saves that post, showing the new-window icon on the external link only, and the UCP setting. Use `--seed` with seed-forum's standard fixtures.
+
 `phpbbmodders/genders` gives every member a gender and saves the UCP selector, a topic, a profile and the ACP settings with the defaults, then the same topic, profile and settings with gender text before the icon, the phpBB 3.0 MOD prosilver icon set and gender in the main profile details. Use `--seed` with seed-forum's standard fixtures.
 
 `phpbbmodders/knowledgebase` makes its own categories, articles (live, waiting for review, with a revision, and a draft) and forum questions, so a board search for `backup` shows its block; `--seed` with seed-forum's standard fixtures adds members to write them. Its two ACP pages are taken in full, so a new setting is not cut off.

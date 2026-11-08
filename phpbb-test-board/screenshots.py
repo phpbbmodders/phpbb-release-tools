@@ -1127,6 +1127,30 @@ def shots_posteripinviewtopic(board: Board, shoot: Shooter, args: argparse.Names
     shoot.shot("posteripinviewtopic-lookup", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True, prepare=look_up)
 
 
+def shots_elonw(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/elonw: a post with an external link, marked with the new-window icon, next to a link
+    to the board itself, and the setting in the UCP.
+
+    Needs a board with posts: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. The first post of the busiest topic is
+    rewritten to hold both links.
+    """
+    _, topic = busiest_forum_and_topic(board)
+    post = board.sql("SELECT topic_first_post_id FROM phpbb_topics WHERE topic_id = ?", (topic,))[0][0]
+    text = ("Version 2.0 is out. The full release notes are on the "
+            "[url=https://www.example.org/releases/2.0]project site[/url], and questions about the "
+            f"update go in our [url={board.base}/viewforum.php?f=2]support forum[/url].")
+    board.php("$t = " + php_string(text) + "; $uid = $bit = ''; $flags = 0;"
+              "generate_text_for_storage($t, $uid, $bit, $flags, true, true, true);"
+              "$db->sql_query('UPDATE ' . POSTS_TABLE . ' SET ' . $db->sql_build_array('UPDATE', "
+              "['post_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit]) . ' WHERE post_id = "
+              + str(int(post)) + "');", check=True)
+    board.purge_cache()
+    shoot.shot("elonw-post-links", f"viewtopic.php?t={topic}", selector=f"#p{post}")
+    shoot.shot("elonw-ucp-setting", "ucp.php?i=ucp_prefs&mode=personal&sid={sid}", admin=True,
+               selector="form#ucp")
+
+
 def shots_genders(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/genders: the gender selector, genders on posts and profiles, and the ACP settings.
 
@@ -1250,6 +1274,7 @@ SHOTS = {
     "phpbbmodders/adduser": shots_adduser,
     "phpbbmodders/autodbbackup": shots_autodbbackup,
     "phpbbmodders/contactadmin": shots_contactadmin,
+    "phpbbmodders/elonw": shots_elonw,
     "phpbbmodders/genders": shots_genders,
     "phpbbmodders/copylinks": shots_copylinks,
     "phpbbmodders/documentation": shots_documentation,
