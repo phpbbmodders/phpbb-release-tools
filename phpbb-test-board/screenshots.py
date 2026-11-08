@@ -1270,7 +1270,46 @@ def shots_autodbbackup(board: Board, shoot: Shooter, args: argparse.Namespace) -
         shoot.shot("autodbbackup-update-directory-error", acp, admin=True, full_page=True, prepare=public_directory)
 
 
+def shots_seenotes(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/seenotes: the reason line next to a post and on a profile, NONE for a member
+    without a current reason, the MCP post notice, MCP → Moderator notes, and the ACP pages.
+
+    Needs seed-forum's fixtures: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php; seed-forum's bin/seed-seenotes-fixtures.php,
+    next to it, then gives the members reasons, notes and warnings. Reasons are
+    only shown to staff, so every shot is taken as the admin.
+    """
+    if not args.seed:
+        raise RuntimeError("run with --seed and seed-forum's bin/seed-standard-fixtures.php")
+    fixtures = Path(args.seed).resolve().parent / "seed-seenotes-fixtures.php"
+    seeded = subprocess.run(["php", "-d", "opcache.enable_cli=0", str(fixtures), str(board.root)],
+                            capture_output=True, text=True)
+    if seeded.returncode != 0:
+        raise RuntimeError(f"See Notes fixtures failed: {(seeded.stderr or seeded.stdout).strip()[-300:]}")
+    board.purge_cache()
+
+    alex = board.sql("SELECT user_id FROM phpbb_users WHERE username = 'forum_alex'")[0][0]
+    drew = board.sql("SELECT user_id FROM phpbb_users WHERE username = 'forum_drew'")[0][0]
+    post = board.sql("SELECT post_id FROM phpbb_posts WHERE poster_id = ? ORDER BY post_time DESC LIMIT 1", (alex,))[0][0]
+    topic = board.sql("SELECT topic_id FROM phpbb_posts WHERE post_id = ?", (post,))[0][0]
+    mcp = "mcp.php?i=-phpbbmodders-seenotes-mcp-main_module&mode=notes&u={user}&sid={{sid}}"
+    acp = "adm/index.php?i=-phpbbmodders-seenotes-acp-main_module&mode={mode}&sid={{sid}}"
+    shoot.shot("seenotes-viewtopic", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True, selector=f"#p{post}")
+    shoot.shot("seenotes-profile", f"memberlist.php?mode=viewprofile&u={alex}&sid={{sid}}", admin=True,
+               selector="form#viewprofile")
+    shoot.shot("seenotes-profile-none", f"memberlist.php?mode=viewprofile&u={drew}&sid={{sid}}", admin=True,
+               selector="form#viewprofile")
+    shoot.shot("seenotes-mcp-notes", mcp.format(user=alex), admin=True, selector="#page-body")
+    shoot.shot("seenotes-mcp-post", f"mcp.php?i=main&mode=post_details&p={post}&sid={{sid}}", admin=True,
+               selector="#page-body")
+    shoot.shot("seenotes-acp-reasons", acp.format(mode="reasons"), admin=True, full_page=True)
+    shoot.shot("seenotes-acp-settings", acp.format(mode="settings"), admin=True, full_page=True)
+    shoot.shot("seenotes-acp-users", f"adm/index.php?i=users&mode=seenotes&u={alex}&sid={{sid}}", admin=True,
+               full_page=True)
+
+
 SHOTS = {
+    "phpbbmodders/seenotes": shots_seenotes,
     "phpbbmodders/adduser": shots_adduser,
     "phpbbmodders/autodbbackup": shots_autodbbackup,
     "phpbbmodders/contactadmin": shots_contactadmin,
