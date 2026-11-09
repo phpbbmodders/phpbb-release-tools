@@ -1332,7 +1332,128 @@ def check_seenotes(b: Board) -> None:
     ok(re.search(r'<dd><a %s>' % to_form, profile), "the profile's Moderator notes link opens the Give a reason form")
 
 
+def check_prunenotifications(b: Board) -> None:
+    """Prune a dormant member's notifications from the ACP in batches and by cron, and optimize the table."""
+    def config(name: str) -> str:
+        rows = b.sql("SELECT config_value FROM phpbb_config WHERE config_name = ?", (name,))
+        return rows[0][0] if rows else ""
+
+    def notifications(user_id: int) -> int:
+        return int(b.sql("SELECT COUNT(notification_id) FROM phpbb_notifications WHERE user_id = ?", (user_id,))[0][0])
+
+    def add_notifications(user_id: int, count: int) -> None:
+        b.php("for ($i = 0; $i < %d; $i++) { $db->sql_query('INSERT INTO ' . NOTIFICATIONS_TABLE . ' '"
+              " . $db->sql_build_array('INSERT', ['notification_type_id' => 1, 'item_id' => $i + 1,"
+              " 'item_parent_id' => 0, 'user_id' => %d, 'notification_read' => 0, 'notification_time' => 1000,"
+              " 'notification_data' => ''])); }" % (count, user_id), check=True)
+
+    def logged(operation: str) -> int:
+        return int(b.sql("SELECT COUNT(log_id) FROM phpbb_log WHERE log_operation = ?", (operation,))[0][0])
+
+    def follow_refresh(body: str) -> tuple:
+        """Follow the ACP's meta refreshes through the prune batches; return (last page, requests)."""
+        requests_made = 1
+        while requests_made <= 20:
+            m = re.search(r'http-equiv="refresh" content="\d+;\s*url=([^"]+)"', body)
+            if not m:
+                break
+            url = m.group(1).replace("&amp;", "&")
+            body = admin.get(url if url.startswith("http") else f"{b.base}/adm/" + url.lstrip("./"), timeout=60).text
+            requests_made += 1
+        return body, requests_made
+
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%prunenotifications%' "
+                "AND module_mode = 'settings'")
+    ok(mid, "ACP module is installed")
+    if not mid:
+        return
+    page_url = f"{b.base}/adm/index.php?i={mid[0][0]}&mode=settings&sid={sid}"
+    page = admin.get(page_url, timeout=20)
+    ok(page.ok and 'id="prunenotifications_settings"' in page.text, "ACP page loads")
+
+    # A member who last visited long ago, and the admin as an active member
+    candidates = b.sql("SELECT user_id, user_lastvisit, user_regdate FROM phpbb_users "
+                       "WHERE user_type IN (0, 1) AND user_id <> 2 ORDER BY user_id")
+    ok(candidates, "the board has a member to make dormant")
+    if not candidates:
+        return
+    dormant, old_lastvisit, old_regdate = int(candidates[0][0]), candidates[0][1], candidates[0][2]
+    b.sql("UPDATE phpbb_users SET user_lastvisit = 1000, user_regdate = 1000 WHERE user_id = ?", (dormant,))
+    try:
+        add_notifications(dormant, 250)
+        add_notifications(2, 5)
+        admin_before = notifications(2)
+
+        # Settings: two years, batches of 100, optimize after pruning
+        action, fields = form_fields(page.text, "prunenotifications_settings")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {
+            **fields, "prunenotifications_days": "730", "prunenotifications_batch": "100",
+            "prunenotifications_cron_enable": "0", "prunenotifications_auto_optimize": "1", "submit": "Submit"})
+        ok("settings saved" in body.lower(), "ACP saves the settings")
+        saved = {k: config(f"prunenotifications_{k}") for k in ("days", "batch", "cron_enable", "auto_optimize")}
+        ok(saved == {"days": "730", "batch": "100", "cron_enable": "0", "auto_optimize": "1"}, f"settings stored: {saved}")
+
+        # Out-of-range values are refused
+        page = admin.get(page_url, timeout=20)
+        action, fields = form_fields(page.text, "prunenotifications_settings")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {
+            **fields, "prunenotifications_days": "1", "prunenotifications_batch": "100",
+            "prunenotifications_cron_enable": "0", "prunenotifications_auto_optimize": "1", "submit": "Submit"})
+        ok("must be from" in body and config("prunenotifications_days") == "730", "an out-of-range period is refused")
+
+        page = admin.get(page_url, timeout=20)
+        ok(re.search(r"<strong>2\d\d</strong>", page.text), "the page counts the dormant member's notifications")
+
+        # Prune now: confirm, then three batches of up to 100
+        action, fields = form_fields(page.text, "prunenotifications_actions")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "prune": "Prune now"})
+        ok('id="confirm"' in body, "Prune now asks for confirmation")
+        action, fields = form_fields(body, "confirm")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "confirm": "Yes"})
+        body, requests_made = follow_refresh(body)
+        ok("form was invalid" not in body.lower(), f"no 'invalid form' error ({requests_made} requests)")
+        ok(requests_made >= 3, f"the prune ran in batches ({requests_made} requests)")
+        ok(notifications(dormant) == 0, f"the dormant member's notifications are gone ({notifications(dormant)} left)")
+        ok(notifications(2) == admin_before, "the active member's notifications are kept")
+        ok(logged("LOG_PRUNENOTIFICATIONS_PRUNED") >= 1, "the prune is in the admin log")
+        ok(logged("LOG_PRUNENOTIFICATIONS_OPTIMIZED") >= 1 and int(config("prunenotifications_last_optimize")) > 0,
+           "the table was optimized after pruning" + ("" if "optimized" in body else f": {page_text(body)[-200:]}"))
+
+        # Optimize now, from its own button
+        page = admin.get(page_url, timeout=20)
+        action, fields = form_fields(page.text, "prunenotifications_actions")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "optimize": "Optimize now"})
+        action, fields = form_fields(body, "confirm")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "confirm": "Yes"})
+        ok("table was optimized" in body, "Optimize now works on this database"
+           + ("" if "table was optimized" in body else f": {page_text(body)[-200:]}"))
+
+        # Cron: a full batch, then the rest with one log entry
+        add_notifications(dormant, 150)
+        b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'prunenotifications_cron_enable'")
+        task = "cron.task.phpbbmodders.prunenotifications.prune"
+        for run in range(2):
+            b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'prunenotifications_next_run'")
+            b.purge_cache()
+            out = b.cli("cron:run", task)
+            ok("rror" not in out, f"cron run {run + 1} finished" + ("" if "rror" not in out else f": {out[-200:]}"))
+        ok(notifications(dormant) == 0, f"cron deleted the rest ({notifications(dormant)} left)")
+        ok(logged("LOG_PRUNENOTIFICATIONS_CRON") == 1, "cron logs once, after the backlog is cleared")
+        ok(int(config("prunenotifications_next_run")) > int(b.php("echo time();")) + 3600,
+           "cron waits a day once nothing is left")
+    finally:
+        b.sql("DELETE FROM phpbb_notifications WHERE notification_time = 1000 AND user_id IN (?, 2)", (dormant,))
+        b.sql("UPDATE phpbb_users SET user_lastvisit = ?, user_regdate = ? WHERE user_id = ?",
+              (old_lastvisit, old_regdate, dormant))
+        b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name IN "
+              "('prunenotifications_cron_enable', 'prunenotifications_auto_optimize')")
+        b.purge_cache()
+
+
 CHECKS = {
+    "phpbbmodders/prunenotifications": check_prunenotifications,
     "phpbbmodders/seenotes": check_seenotes,
     "phpbbmodders/autodbbackup": check_autodbbackup,
     "phpbbmodders/elonw": check_elonw,
