@@ -1312,7 +1312,58 @@ def shots_seenotes(board: Board, shoot: Shooter, args: argparse.Namespace) -> No
                full_page=True)
 
 
+def shots_prunenotifications(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/prunenotifications: the ACP page, the Prune now confirmation and the finished prune.
+
+    Needs seed-forum's fixtures: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. Three members are made dormant (last
+    visits two to five years ago) and get 1,840 unread notifications between
+    them; the admin keeps 12. prunenotifications-acp shows the counts and the
+    settings, prunenotifications-acp-confirm the confirmation, and
+    prunenotifications-acp-done the message after all batches ran and the
+    table was optimized.
+    """
+    if not args.seed:
+        raise RuntimeError("run with --seed and seed-forum's bin/seed-standard-fixtures.php")
+    members = [r[0] for r in board.sql("SELECT user_id FROM phpbb_users WHERE user_type IN (0, 1) "
+                                       "AND user_id <> 2 ORDER BY user_id")][:3]
+    if len(members) < 3:
+        raise RuntimeError("the seeded board needs at least three members besides the admin")
+    year = 365 * 86400
+    now = int(time.time())
+    for user_id, (years, count) in zip(members, ((2.2, 1200), (3.5, 480), (5, 160))):
+        board.sql("UPDATE phpbb_users SET user_lastvisit = ?, user_regdate = ? WHERE user_id = ?",
+                  (now - int(years * year), now - int((years + 1) * year), user_id))
+        board.php("for ($i = 0; $i < %d; $i++) { $db->sql_query('INSERT INTO ' . NOTIFICATIONS_TABLE . ' '"
+                  " . $db->sql_build_array('INSERT', ['notification_type_id' => 1, 'item_id' => $i + 1,"
+                  " 'item_parent_id' => 0, 'user_id' => %d, 'notification_read' => 0,"
+                  " 'notification_time' => %d, 'notification_data' => ''])); }"
+                  % (count, user_id, now - int(years * year)), check=True)
+    board.php("for ($i = 0; $i < 12; $i++) { $db->sql_query('INSERT INTO ' . NOTIFICATIONS_TABLE . ' '"
+              " . $db->sql_build_array('INSERT', ['notification_type_id' => 1, 'item_id' => $i + 1,"
+              " 'item_parent_id' => 0, 'user_id' => 2, 'notification_read' => 0, 'notification_time' => %d,"
+              " 'notification_data' => ''])); }" % now, check=True)
+    set_config(board, {"prunenotifications_days": "730", "prunenotifications_batch": "500",
+                       "prunenotifications_cron_enable": "1", "prunenotifications_auto_optimize": "1"})
+    acp = "adm/index.php?i=-phpbbmodders-prunenotifications-acp-main_module&mode=settings&sid={sid}"
+    shoot.shot("prunenotifications-acp", acp, admin=True, full_page=True)
+
+    def open_confirm(p) -> None:
+        p.wait_for_timeout(1200)  # phpBB's minimum time before a form may be submitted
+        p.click("#prunenotifications_prune")
+        p.locator("form#confirm").wait_for()
+    shoot.shot("prunenotifications-acp-confirm", acp, admin=True, full_page=True, prepare=open_confirm)
+
+    def run_prune(p) -> None:
+        open_confirm(p)
+        p.click("form#confirm input[name=confirm]")
+        # The batches follow each other by meta refresh; wait for the final message
+        p.get_by_text("The notifications table was optimized").wait_for(timeout=120000)
+    shoot.shot("prunenotifications-acp-done", acp, admin=True, full_page=True, prepare=run_prune)
+
+
 SHOTS = {
+    "phpbbmodders/prunenotifications": shots_prunenotifications,
     "phpbbmodders/seenotes": shots_seenotes,
     "phpbbmodders/adduser": shots_adduser,
     "phpbbmodders/autodbbackup": shots_autodbbackup,

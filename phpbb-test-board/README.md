@@ -150,6 +150,8 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/seenotes` needs `--seed` with seed-forum's standard fixtures; it then runs seed-forum's `bin/seed-seenotes-fixtures.php` from the same folder, which gives the members reasons, notes and warnings. Reasons show only to staff, so every shot is taken as the admin: a post's mini-profile with the reason, a profile with the reason and the Moderator notes link, a post by a member without a reason with the notes button, the MCP post details notice, MCP → Moderator notes, ACP → Manage users → Moderator notes, and the ACP reasons and settings pages (in full).
 
+`phpbbmodders/prunenotifications` needs `--seed` with seed-forum's standard fixtures. It makes three members dormant, with last visits two to five years ago and 1,840 unread notifications between them, gives the admin 12, then saves the ACP page with the counts and settings (in full), the Prune now confirmation, and the message after every batch has run and the table has been optimized.
+
 `phpbbmodders/topicclaim` needs `--seed` with seed-forum's standard fixtures, for its `forum_moderator` user. That user claims the busiest topic with a note, and the admin claims another topic in the same forum. Claims show only to moderators, so every shot is taken as the admin: the forum's topic list, the claim notice on the topic page, the claim page (with take over, transfer and release), MCP → Claimed topics and the ACP settings.
 
 `phpbbmodders/printallposts` sets the board to two posts per page, so the busiest topic spans two pages, then saves the **Topic tools** menu open on it and the **Print all** page showing every post, both as a guest. Use `--seed` with seed-forum's standard fixtures.
