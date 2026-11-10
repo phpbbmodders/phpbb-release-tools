@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 # Option-handling tests for the phpbb-test-board tools: help output, exit
 # status for bad arguments, and the error for a missing board. Does not build
-# a board or contact phpBB, and run-unit-tests.sh and php-lint.sh are only given bad arguments;
+# a board or contact phpBB, and run-unit-tests.sh, run-epv.sh and php-lint.sh are only given bad arguments;
 # the Python scripts' first run creates their virtualenv
 # (phpbb-test-board/.venv), which needs network access once.
 # Usage: tests/test-phpbb-test-board.sh
@@ -82,6 +82,14 @@ for script in smoke_test.py feature_checks.py screenshots.py; do
   check "$script --with a non-git directory exits 2" \
     exits_with 2 "$tools/$script" "$tmp/repo" --with "$tmp" -b "$tmp"
 done
+
+# page_a11y.py: arguments are checked before any board is touched
+check "page_a11y.py --help exits 0" exits_with 0 "$tools/page_a11y.py" --help
+check "page_a11y.py --help describes --keys" output_has "--keys" "$tools/page_a11y.py" --help
+check "page_a11y.py without arguments exits 2" exits_with 2 "$tools/page_a11y.py"
+check "page_a11y.py with a page lacking LABEL= exits 2" exits_with 2 "$tools/page_a11y.py" index.php
+check "page_a11y.py with a missing seed-forum board exits 1" \
+  exits_with 1 "$tools/page_a11y.py" -s "$tmp/no-board" "Index=index.php"
 
 # rename_upgrade.py: arguments are checked before any board is touched
 renamed="$tmp/renamed-ext"
@@ -165,6 +173,17 @@ check "run-unit-tests.sh with two directories exits 2" \
   exits_with 2 "$tools/run-unit-tests.sh" "$tmp/ext-no-phpunit" "$tmp/ext-bad-name"
 check "run-unit-tests.sh rejects a composer name that is not vendor/name" \
   output_has "composer.json has no valid vendor/name" "$tools/run-unit-tests.sh" -e "$tmp/no-env" "$tmp/ext-bad-name"
+
+# run-epv.sh: option handling only; no phpBB checkout is cloned or run
+check "run-epv.sh without arguments shows help and exits 0" exits_with 0 "$tools/run-epv.sh"
+check "run-epv.sh --help shows usage" output_has "Usage: run-epv.sh" "$tools/run-epv.sh" --help
+check "run-epv.sh with an unknown option exits 2" exits_with 2 "$tools/run-epv.sh" --nope "$tmp"
+check "run-epv.sh with an unknown branch exits 2" exits_with 2 "$tools/run-epv.sh" -b 3.2.x "$tmp/ext-no-phpunit"
+check "run-epv.sh with a missing directory exits 2" exits_with 2 "$tools/run-epv.sh" "$tmp/no-such-dir"
+check "run-epv.sh with two directories exits 2" \
+  exits_with 2 "$tools/run-epv.sh" "$tmp/ext-no-phpunit" "$tmp/ext-bad-name"
+check "run-epv.sh rejects a composer name that is not vendor/name" \
+  output_has "composer.json has no valid vendor/name" "$tools/run-epv.sh" -e "$tmp/no-env" "$tmp/ext-bad-name"
 
 # php-lint.sh: option handling only; every case exits before Docker is used
 check "php-lint.sh without arguments shows help and exits 0" exits_with 0 "$tools/php-lint.sh"

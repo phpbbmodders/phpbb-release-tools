@@ -69,6 +69,18 @@ Runs `php -l` on every PHP file under each PHP version (default 7.4 and 8.4), in
 
 Exit status: 0 when every file passes on every version, 1 when a file fails or Docker fails, 2 for bad arguments. The first run of a version pulls its image.
 
+### `run-epv.sh`: EPV the way CI fails on it
+
+```bash
+phpbb-test-board/run-epv.sh path/to/extension [-b 3.3.x|master] [-u]
+```
+
+Runs EPV (phpBB's Extension Pre Validator) as the phpbbmodders reusable workflow (`phpbbmodders/.github`, `epv.yml`) does in CI, and fails the same way: on every Fatal or Error finding the extension does not list in `.github/epv-allowed.txt`. EPV itself exits 0 on Error findings, so running it by hand misses what fails CI. Allowed findings that no longer occur are listed so they can be removed. It needs no board.
+- **The checkout** is set up on first use in `~/.cache/phpbb-release-tools/epv-BRANCH` (or `--env DIR`, or `PHPBB_EPV_ENV`): a shallow clone of phpBB with EPV installed through phpBB's own `composer.phar` (`dev-master`, or `dev-epv-phpbb4` for `master`, as CI does). `--update` pulls it and reinstalls EPV.
+- **The extension** is copied in afresh on every run, as the only extension under `phpBB/ext/`, and EPV is pointed at that folder, as CI does.
+
+Exit status: 0 when nothing would fail CI, 1 when a finding would or setup fails, 2 for bad arguments. Needs `git`, `php`, `rsync` and `jq`.
+
 ### `smoke_test.py`: does the extension break anything?
 
 ```bash
@@ -124,11 +136,21 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/contactadmin` saves the three documentation gallery shots (ACP settings, guest form, member form) with private-message delivery and no captcha, plus three for its 10/18/2026 update gallery. The last of those sends a guest message through the form and shows the topic the contact bot posts.
 
+`phpbbmodders/autodbbackup` saves its ACP settings set to daily gzip backups keeping seven, then runs the backup cron twice and saves phpBB's ACP Restore page listing the two backups, which it deletes afterwards.
+
+`phpbbmodders/elonw` rewrites the first post of the busiest topic to hold an external link and a link to the board itself, then saves that post, showing the new-window icon on the external link only, and the UCP setting. Use `--seed` with seed-forum's standard fixtures.
+
+`phpbbmodders/genders` gives every member a gender and saves the UCP selector, a topic, a profile and the ACP settings with the defaults, then the same topic, profile and settings with gender text before the icon, the phpBB 3.0 MOD prosilver icon set and gender in the main profile details. Use `--seed` with seed-forum's standard fixtures.
+
 `phpbbmodders/knowledgebase` makes its own categories, articles (live, waiting for review, with a revision, and a draft) and forum questions, so a board search for `backup` shows its block; `--seed` with seed-forum's standard fixtures adds members to write them. Its two ACP pages are taken in full, so a new setting is not cut off.
 
 `phpbbmodders/newspage` replaces the board's welcome topic with four example news topics, the last one opening with a picture the script draws (and deletes afterwards), and makes that forum the news forum. It saves the news page with the first image above the text and without poster information or post buttons, one news item as the admin, the ACP settings (in full), the news page on a phone and filtered by forum, then the news page with poster information and post buttons on, shortened to 120 characters, and without the filters.
 
 `phpbbmodders/copylinks` clicks a topic title, a post subject and an FAQ question and shows each one's icon turned into a tick, with the copy to the clipboard stubbed, since headless Chromium may not write to it. It also saves the ACP settings. Use `--seed` with seed-forum's standard fixtures for a topic with replies.
+
+`phpbbmodders/seenotes` needs `--seed` with seed-forum's standard fixtures; it then runs seed-forum's `bin/seed-seenotes-fixtures.php` from the same folder, which gives the members reasons, notes and warnings. Reasons show only to staff, so every shot is taken as the admin: a post's mini-profile with the reason, a profile with the reason and the Moderator notes link, a post by a member without a reason with the notes button, the MCP post details notice, MCP → Moderator notes, ACP → Manage users → Moderator notes, and the ACP reasons and settings pages (in full).
+
+`phpbbmodders/prunenotifications` needs `--seed` with seed-forum's standard fixtures. It makes three members dormant, with last visits two to five years ago and 1,840 unread notifications between them, gives the admin 12, then saves the ACP page with the counts and settings (in full), the Prune now confirmation, and the message after every batch has run and the table has been optimized.
 
 `phpbbmodders/topicclaim` needs `--seed` with seed-forum's standard fixtures, for its `forum_moderator` user. That user claims the busiest topic with a note, and the admin claims another topic in the same forum. Claims show only to moderators, so every shot is taken as the admin: the forum's topic list, the claim notice on the topic page, the claim page (with take over, transfer and release), MCP → Claimed topics and the ACP settings.
 
@@ -178,6 +200,23 @@ Scans an extension's or style's templates (`styles/`, `adm/style/`, or a style's
 ```
 
 In ACP templates (`adm/style/`) use `aria-label` instead of the span: the ACP style has no `sr-only` class, so the text would show. A `title` on the icon itself, phpBB's ACP pattern, counts as the tooltip, and a link around an image with alt text passes. Problems are printed as `FILE:LINE: message`, and the exit status is 1 if there are any. It needs no board and only Python's standard library.
+
+### `page_a11y.py`: automated accessibility checks on a running board
+
+```bash
+phpbb-test-board/page_a11y.py -s path/to/seeded-board -p PORT [-a] [-k] 'LABEL=URL' [more pages...]
+```
+
+Opens each page in Chromium at a desktop and a phone width and runs [axe-core](https://github.com/dequelabs/axe-core) with its WCAG 2.0, 2.1 and 2.2 A and AA rules, plus a reflow check: at the phone width the page must not scroll sideways. `URL` is relative to the board root. With `-a`/`--admin` the pages open as the board admin with the ACP unlocked, and `{sid}` in a URL becomes the admin's session id:
+
+```bash
+phpbb-test-board/page_a11y.py -s ~/repos/seeded-board/adduser-33 -p 8120 -a -k \
+  'Add User=adm/index.php?i=-phpbbmodders-adduser-acp-adduser_module&mode=main&sid={sid}'
+```
+
+With `-k`/`--keys` it also presses Tab through the page's main content and lists every stop with its accessible name; a stop whose look does not change on focus (no outline, shadow, border, background or text change) fails. axe "incomplete" results are listed for review by hand and do not fail the run.
+
+The pinned axe-core release is downloaded from the npm registry on first use, checked against its published sha512 hash, and kept in `~/.cache/phpbb-release-tools/`. `-s` takes a seed-forum board; `-b` a board from `setup-board.sh`. Violations in phpBB's own layout (ACP footer contrast, the phone menu) show up on every page; judge an extension by the elements it adds. An automated scan does not replace testing with a screen reader. The exit status is 1 if there is any violation.
 
 ## Extensions that need another extension
 

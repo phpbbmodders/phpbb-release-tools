@@ -14,6 +14,7 @@ Test users get random throwaway passwords that are never printed.
 Exit status: 0 if every check passed, 1 if any failed, 2 for bad arguments.
 """
 import argparse
+import hashlib
 import json
 import re
 import secrets
@@ -21,9 +22,8 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _venv import ensure_venv  # noqa: E402
@@ -479,9 +479,10 @@ def check_honeypot(b: Board) -> None:
 def check_adduser(b: Board) -> None:
     admin = requests.Session()
     sid = b.login(admin, acp=True)
-    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode <> ''")[0][0]
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode = 'main'")[0][0]
     page_url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
-    action, fields = form_fields(admin.get(page_url).text)
+    page = admin.get(page_url).text
+    action, fields = form_fields(page)
     ok("form_token" in fields, "Add User form carries a form token")
     post_back(admin, f"{b.base}/adm", page_url, action, {
         **fields, "username": "addedprobe", "email": "addedprobe@example.com", "new_password": "Probe-pw-12345",
@@ -492,6 +493,293 @@ def check_adduser(b: Board) -> None:
         ok(b.sql("SELECT 1 FROM phpbb_user_group WHERE user_id = ? AND group_id = 4", (row[0][0],)),
            "the user was added to the chosen group (Global moderators)")
     ok(b.sql("SELECT 1 FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'"), "the new account was logged")
+    if 'name="default_group"' in page:
+        check_adduser_default_group(b, admin, page_url)
+    if b.sql("SELECT 1 FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode = 'csv'"):
+        check_adduser_csv(b, admin, sid)
+    if b.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'adduser_admin_copy'"):
+        check_adduser_admin_copy(b, admin, sid)
+    language = b.root / "ext/phpbbmodders/adduser/language/en/info_acp_adduser.php"
+    if language.is_file() and "ADDUSER_PASSWORD_REQUIRED" in language.read_text():
+        check_adduser_no_email(b, admin, sid, page_url)
+
+
+def check_adduser_no_email(b: Board, admin: requests.Session, sid: str, page_url: str) -> None:
+    """adduser with board email off: a password is required, and the account is active at once.
+
+    Runs with admin activation on, the setting that used to send admins an
+    activation notice for an account that was already active. Restores the
+    settings it changes.
+    """
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'require_activation')"))
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'email_enable'")
+    b.sql("UPDATE phpbb_config SET config_value = '2' WHERE config_name = 'require_activation'")
+    b.purge_cache()
+    try:
+        page = admin.get(page_url).text
+        ok("Board email is disabled" in page and 'name="activate"' not in page,
+           "email off: the page says no email is sent and offers no activation box")
+
+        def add(name: str, password: str) -> str:
+            action, fields = form_fields(admin.get(page_url).text)
+            return post_back(admin, f"{b.base}/adm", page_url, action, {
+                **fields, "username": name, "email": f"{name}@example.com", "new_password": password,
+                "password_confirm": password, "lang": "en", "group": "0", "submit": "Submit"})
+
+        body = add("noemailblank", "")
+        ok("enter a password" in body and not b.sql("SELECT 1 FROM phpbb_users WHERE username_clean = 'noemailblank'"),
+           "email off: a blank password is refused instead of generating one nobody learns")
+        body = add("noemailprobe", "Probe-pw-12345")
+        row = b.sql("SELECT user_id, user_type FROM phpbb_users WHERE username_clean = 'noemailprobe'")
+        ok(row and str(row[0][1]) == "0" and "no email was sent" in body,
+           "email off: the account is created active and the message says no email was sent")
+        if row:
+            notices = b.sql("SELECT 1 FROM phpbb_notifications n JOIN phpbb_notification_types t "
+                            "ON t.notification_type_id = n.notification_type_id "
+                            "WHERE t.notification_type_name = 'notification.type.admin_activate_user' "
+                            "AND n.item_id = ?", (row[0][0],))
+            ok(not notices, "email off: admins get no activation notice for the already active account")
+        mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' "
+                    "AND module_mode = 'csv'")[0][0]
+        csv_url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
+        _, fields = form_fields(admin.get(csv_url).text, "adduser_csv")
+        time.sleep(1.1)
+        r = admin.post(csv_url, data={**fields, "group": "0", "preview": "1"},
+                       files={"csv_file": ("users.csv", b"username,email\nnoemailcsv,noemailcsv@example.com\n",
+                                           "text/csv")}).text
+        ok("this row needs a password" in page_text(r) and "No rows are ready" in page_text(r),
+           "email off: a CSV row without a password is skipped")
+    finally:
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        b.purge_cache()
+
+
+def check_adduser_default_group(b: Board, admin: requests.Session, page_url: str) -> None:
+    """adduser's default-group choice: Registered users, Newly registered users or the chosen group.
+
+    Runs with board email off and the new-member post limit on, and restores
+    the settings it changes.
+    """
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'new_member_post_limit', 'new_member_group_default')"))
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'email_enable'")
+    b.sql("UPDATE phpbb_config SET config_value = '3' WHERE config_name = 'new_member_post_limit'")
+    try:
+        groups = dict(b.sql("SELECT group_name, group_id FROM phpbb_groups WHERE group_name IN "
+                            "('REGISTERED', 'NEWLY_REGISTERED', 'GLOBAL_MODERATORS')"))
+
+        def add(name: str, extra: dict) -> str:
+            page = admin.get(page_url).text
+            action, fields = form_fields(page)
+            return post_back(admin, f"{b.base}/adm", page_url, action, {
+                **fields, "username": name, "email": f"{name}@example.com", "new_password": "Probe-pw-12345",
+                "password_confirm": "Probe-pw-12345", "lang": "en", "group": "0", "new_user": "0",
+                "submit": "Submit", **extra})
+
+        def default_of(name: str) -> str:
+            row = b.sql("SELECT group_id FROM phpbb_users WHERE username_clean = ?", (name,))
+            return str(row[0][0]) if row else ""
+
+        for setting, expected in (("0", "registered"), ("1", "newly_registered")):
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'new_member_group_default'",
+                  (setting,))
+            b.purge_cache()
+            page = admin.get(page_url).text
+            ok(re.search(r'value="%s"[^>]*checked' % expected, page),
+               f"default group starts out as {expected} when the board's NRU-default setting is {setting}")
+
+        add("dgprobenru", {"default_group": "newly_registered"})
+        new = b.sql("SELECT user_new FROM phpbb_users WHERE username_clean = 'dgprobenru'")
+        ok(default_of("dgprobenru") == str(groups["NEWLY_REGISTERED"]) and new and str(new[0][0]) == "1",
+           "Newly registered users as default: set, and the account marked as a new user")
+        add("dgprobereg", {"default_group": "registered", "new_user": "1"})
+        ok(default_of("dgprobereg") == str(groups["REGISTERED"]),
+           "Registered users as default wins over the board's NRU-default setting")
+        add("dgprobegrp", {"default_group": "group", "group": str(groups["GLOBAL_MODERATORS"])})
+        ok(default_of("dgprobegrp") == str(groups["GLOBAL_MODERATORS"]), "the chosen group as default")
+        r = add("dgprobenone", {"default_group": "group"})
+        ok("Choose a group above" in page_text(r) and not default_of("dgprobenone"),
+           "the chosen group as default without a group is refused")
+    finally:
+        ids = [str(row[0]) for row in b.sql("SELECT user_id FROM phpbb_users WHERE username_clean LIKE 'dgprobe%'")]
+        if ids:
+            b.sql(f"DELETE FROM phpbb_user_group WHERE user_id IN ({','.join(ids)})")
+            b.sql(f"DELETE FROM phpbb_users WHERE user_id IN ({','.join(ids)})")
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        b.purge_cache()
+
+
+def check_adduser_admin_copy(b: Board, admin: requests.Session, sid: str) -> None:
+    """adduser's administrator copy of welcome emails, through the CSV page.
+
+    Board email goes to phpBB's queue (email_package_size on), so nothing is
+    sent and the queued emails can be read from the queue file, which is
+    emptied first and restored afterwards.
+    """
+    registration = admin.get(f"{b.base}/adm/index.php?i=acp_board&mode=registration&sid={sid}").text
+    ok('name="config[adduser_admin_copy]"' in registration,
+       "admin copy setting shown in ACP > Board settings > User registration settings")
+    queue = b.root / "cache" / "production" / "queue.php"
+    if not queue.parent.is_dir():
+        queue = b.root / "cache" / "queue.php"
+    saved_queue = queue.read_bytes() if queue.exists() else None
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'email_package_size', 'require_activation', 'adduser_admin_copy')"))
+    b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'email_enable'")
+    b.sql("UPDATE phpbb_config SET config_value = '20' WHERE config_name = 'email_package_size'")
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'require_activation'")
+    admin_email = b.sql("SELECT user_email FROM phpbb_users WHERE username_clean = 'admin'")[0][0]
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' AND module_mode = 'csv'")[0][0]
+    url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
+
+    def create(rows: str) -> str:
+        queue.unlink(missing_ok=True)
+        _, fields = form_fields(admin.get(url).text, "adduser_csv")
+        time.sleep(1.1)
+        r = admin.post(url, data={**fields, "group": "0", "preview": "1"},
+                       files={"csv_file": ("users.csv", ("username,email\n" + rows).encode(), "text/csv")}).text
+        _, create_fields = form_fields(r, "adduser_csv_create")
+        time.sleep(1.1)
+        admin.post(url, data={**create_fields, "create": "1"})
+        return queue.read_text(errors="replace") if queue.exists() else ""
+
+    try:
+        for value, label in (("0", "off"), ("1", "on")):
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'adduser_admin_copy'", (value,))
+            b.purge_cache()
+            n = 2 if value == "1" else 1
+            rows = "".join(f"copyprobe{label}{i},copyprobe{label}{i}@example.com\n" for i in range(n))
+            text = create(rows)
+            copies = text.count("Accounts created on")
+            if value == "0":
+                ok("copyprobeoff0@example.com" in text and copies == 0,
+                   "admin copy off: the welcome email is queued, no copy")
+                continue
+            ok(copies == 1 and admin_email in text, "admin copy on: one copy for the whole file, to the admin")
+            body = re.search(r"This is your copy.*?not included in this copy", text, re.S)
+            ok(body and "copyprobeon0" in body.group(0) and "copyprobeon1" in body.group(0),
+               "admin copy lists every created account")
+            ok(body and "reset_password" not in body.group(0) and "mode=activate" not in body.group(0),
+               "admin copy has no set-password or activation link")
+    finally:
+        ids = [str(row[0]) for row in b.sql("SELECT user_id FROM phpbb_users WHERE username_clean LIKE 'copyprobe%'")]
+        if ids:
+            b.sql(f"DELETE FROM phpbb_user_group WHERE user_id IN ({','.join(ids)})")
+            b.sql(f"DELETE FROM phpbb_users WHERE user_id IN ({','.join(ids)})")
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        queue.unlink(missing_ok=True)
+        if saved_queue is not None:
+            queue.write_bytes(saved_queue)
+        b.purge_cache()
+
+
+def page_text(html: str) -> str:
+    """Visible text of a page, whitespace collapsed, for matching messages."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+
+
+def check_adduser_csv(b: Board, admin: requests.Session, sid: str) -> None:
+    """adduser's "Add users from CSV" page: upload, check rows, create, summary.
+
+    Runs with board email off (no mail is sent) and restores the settings it
+    changes. The 50-row run guards against PHP's time limit: hashing each
+    password with phpBB's default algorithm is slow on purpose.
+    """
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('email_enable', 'require_activation', 'allow_birthdays')"))
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name IN ('email_enable', 'require_activation')")
+    b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'allow_birthdays'")
+    b.purge_cache()
+    try:
+        mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%adduser%' "
+                    "AND module_mode = 'csv'")[0][0]
+        url = f"{b.base}/adm/index.php?i={mid}&sid={sid}"
+        page = admin.get(url).text
+        _, fields = form_fields(page, "adduser_csv")
+        ok('enctype="multipart/form-data"' in page and "form_token" in fields,
+           "CSV upload form takes a file and carries a form token")
+
+        def upload(content: bytes, extra: dict = None) -> str:
+            time.sleep(1.1)
+            data = {**fields, "group": "0", "preview": "1", **(extra or {})}
+            return admin.post(url, data=data, files={"csv_file": ("users.csv", content, "text/csv")}).text
+
+        def confirm(data: dict) -> str:
+            time.sleep(1.1)
+            return admin.post(url, data={**data, "create": "1"}).text
+
+        def count_csv_users() -> int:
+            return int(b.sql("SELECT COUNT(*) FROM phpbb_users WHERE username_clean LIKE 'csvprobe%' "
+                             "OR username_clean LIKE '%csvprobex%'")[0][0])
+
+        r = upload(b"username,email,<b>phone</b>\n")
+        ok("&lt;b&gt;phone" in r and "<b>phone</b>" not in r,
+           "CSV: an unknown column is reported, its name escaped")
+        time.sleep(1.1)
+        ok("Choose a CSV file" in page_text(admin.post(url, data={**fields, "preview": "1"}).text),
+           "CSV: a missing file is reported")
+
+        group_id = str(b.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'GLOBAL_MODERATORS'")[0][0])
+        csv = ("\ufeffUsername;Email;Password;Lang;Birthday\r\n"
+               "csvprobea;csvprobea@example.com;Probe-pass-123;en;05-03-1990\r\n"
+               "csvprobeb;csvprobeb@example.com;Probe-pass-123;;\r\n"
+               "csvprobeb;csvprobeb2@example.com;;;\r\n"
+               "csvprobec;not-an-email;;;\r\n"
+               "admin;csvprobeadmin@example.com;;;\r\n"
+               "csvprobed;csvprobed@example.com;;;1990-03-05\r\n"
+               "csvprobee;csvprobee@example.com;;xx;\r\n"
+               ";;;;\r\n"
+               "<i>csvprobex</i>;csvprobex@example.com;Probe-pass-123;;\r\n").encode()
+        log_before = int(b.sql("SELECT COUNT(*) FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'")[0][0])
+        r = upload(csv, {"group": group_id, "group_default": "1", "default_group": "group"})
+        t = page_text(r)
+        ok("3 rows are ready" in t and "5 rows are skipped" in t,
+           "CSV check page: 3 rows ready, 5 skipped (semicolons, byte order mark, header in title case)")
+        ok("The same username is on row 3" in t, "CSV check page: duplicate username in the file reported")
+        ok("DD-MM-YYYY" in t and "The language you specified is not valid" in t,
+           "CSV check page: wrong birthday format and unknown language reported")
+        ok("&lt;i&gt;csvprobex&lt;/i&gt;" in r and "<i>csvprobex</i>" not in r,
+           "CSV check page: markup in a username is escaped")
+        ok("Probe-pass-123" not in r, "CSV check page: no plaintext password in the page")
+        ok(count_csv_users() == 0, "CSV: checking creates nothing")
+
+        _, create = form_fields(r, "adduser_csv_create")
+        bad = confirm({**create, "csv_hash": "0" * 64})
+        ok("were changed or are incomplete" in page_text(bad) and count_csv_users() == 0,
+           "CSV: a tampered payload is refused and creates nothing")
+        t = page_text(confirm(create))
+        ok("3 accounts were created" in t and "5 rows are skipped" in t, "CSV summary: 3 created, 5 skipped")
+        ok(count_csv_users() == 3, "CSV: exactly the 3 ready accounts exist")
+        alice = b.sql("SELECT user_id, user_birthday, group_id FROM phpbb_users WHERE username_clean = 'csvprobea'")
+        ok(alice and alice[0][1].replace(" ", "") == "5-3-1990" and str(alice[0][2]) == group_id,
+           "CSV: birthday stored and the chosen group made the default group")
+        log_after = int(b.sql("SELECT COUNT(*) FROM phpbb_log WHERE log_operation = 'LOG_USER_ADDED'")[0][0])
+        ok(log_after - log_before == 3, "CSV: each created account was logged")
+        ok("No accounts were created" in page_text(confirm(create)),
+           "CSV: sending the same rows again creates nothing")
+
+        def rows(n: int) -> bytes:
+            return ("username,email,password\n" + "".join(
+                f"csvprobebulk{i:03d},csvprobebulk{i:03d}@example.com,Probe-pass-123\n" for i in range(n))).encode()
+
+        ok("more than 50 rows" in page_text(upload(rows(51))), "CSV: a 51-row file is refused")
+        r = upload(rows(50))
+        _, create = form_fields(r, "adduser_csv_create")
+        ok("50 rows are ready" in page_text(r) and "50 accounts were created" in page_text(confirm(create)),
+           "CSV: a full 50-row file is checked and created within PHP's time limit")
+    finally:
+        ids = [str(row[0]) for row in b.sql("SELECT user_id FROM phpbb_users WHERE username_clean LIKE "
+                                            "'csvprobe%' OR username_clean LIKE '%csvprobex%'")]
+        if ids:
+            b.sql(f"DELETE FROM phpbb_user_group WHERE user_id IN ({','.join(ids)})")
+            b.sql(f"DELETE FROM phpbb_users WHERE user_id IN ({','.join(ids)})")
+        for name, value in saved.items():
+            b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, name))
+        b.purge_cache()
 
 
 def check_sfscompanion(b: Board) -> None:
@@ -621,87 +909,633 @@ def check_contactadmin(b: Board) -> None:
     ok(not changed, "saving the settings changed no other setting" + (f": {changed}" if changed else ""))
 
 
+def check_genders(b: Board) -> None:
+    """Exercise the reported profile and UCP paths with the stock board style."""
+    member = requests.Session()
+    sid = b.login(member, acp=True)
+    ucp = f"{b.base}/ucp.php?i=ucp_profile&mode=profile_info&sid={sid}"
+    page = member.get(ucp, timeout=20)
+    action, fields = form_fields(page.text, "ucp")
+    ok(page.ok and 'name="user_gender"' in page.text and "form_token" in fields,
+       "UCP profile displays the gender selector and form token")
+    post_back(member, b.base, ucp, action, {**fields, "user_gender": "2", "submit": "Submit"})
+    saved = b.sql("SELECT user_gender FROM phpbb_users WHERE user_id = 2")
+    ok(saved and str(saved[0][0]) == "2", "UCP saves the selected gender")
+    page = member.get(ucp, timeout=20)
+    ok(re.search(r'<option\s+value="2"\s+selected=', page.text),
+       "UCP displays the saved choice")
+    profile = member.get(f"{b.base}/memberlist.php?mode=viewprofile&u=2", timeout=20)
+    ok(profile.ok and 'class="fa fa-venus"' in profile.text, "member profile displays the saved gender icon")
+    preview = member.get(f"{b.base}/{b.route('gender_id/2')}", timeout=20)
+    ok(preview.ok and preview.json().get("gender") == "fa-venus", "gender preview route returns the correct icon")
+    acp = member.get(f"{b.base}/adm/index.php?i=users&mode=profile&u=2&sid={sid}", timeout=20)
+    ok(acp.ok and 'name="user_gender"' in acp.text, "ACP user profile displays the gender selector")
+
+
 def check_autodbbackup(b: Board) -> None:
-    """Exercise the hourly settings and the extractor against the board's database."""
+    """Save the ACP settings, run the backup cron three times and check retention and ACP Restore."""
+    marker = "picoautodbbackup"  # kept by phpbbmodders/autodbbackup so older backups are still pruned
+    on_storage = getattr(b, "version", "").startswith("4.")  # phpBB 4.0 keeps backups in its storage and backups table
+
+    def backups() -> list:
+        """Names of the backups phpBB knows about: the backups table on 4.0, store/ files on 3.3."""
+        if on_storage:
+            return sorted(r[0] for r in b.sql("SELECT filename FROM phpbb_backups"))
+        out = b.php("foreach (glob($phpbb_root_path . 'store/backup_*') as $f) { echo basename($f), \"\\n\"; }")
+        return sorted(line for line in out.splitlines() if line.startswith("backup_"))
+
+    def config(name: str) -> str:
+        rows = b.sql("SELECT config_value FROM phpbb_config WHERE config_name = ?", (name,))
+        return rows[0][0] if rows else ""
+
     admin = requests.Session()
     sid = b.login(admin, acp=True)
-    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_mode = 'settings' "
-                "AND module_basename LIKE '%auto_db_backup_module'")[0][0]
-    page = admin.get(f"{b.base}/adm/index.php?i={mid}&sid={sid}", timeout=20)
-    action, fields = form_fields(page.text, "acp_auto_db_backup")
-    ok(page.ok and "form_token" in fields, "backup settings form opens")
-    next_run = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(second=0, microsecond=0)
-    time.sleep(1.1)
-    response = admin.post(urljoin(page.url, action), data={
-        **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "text",
-        "auto_db_backup_copies": "1", "auto_db_backup_gc": "1", "auto_db_backup_gc_unit": "hours",
-        "auto_db_backup_year": next_run.year, "auto_db_backup_month": next_run.month,
-        "auto_db_backup_day": next_run.day, "auto_db_backup_hour": next_run.hour,
-        "auto_db_backup_minute": next_run.minute, "submit": "Submit",
-    }, timeout=20)
-    configs = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name LIKE 'auto_db_backup_%'"))
-    saved_interval = int(configs["auto_db_backup_gc"])
-    saved_last = int(configs["auto_db_backup_last_gc"])
-    ok(response.ok and saved_interval == 3600 and configs["auto_db_backup_gc_unit"] == "hours"
-       and saved_last + saved_interval == int(next_run.timestamp()), "ACP saves the hourly interval and chosen start")
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%autodbbackup%' "
+                "AND module_mode = 'settings'")
+    ok(mid, "ACP module is installed")
+    if not mid:
+        return
+    page_url = f"{b.base}/adm/index.php?i={mid[0][0]}&sid={sid}"
+    page = admin.get(page_url, timeout=20)
+    ok(page.ok and 'id="acp_auto_db_backup"' in page.text and "BUY_ME" not in page.text,
+       "ACP settings page loads")
 
-    # Keep the custom directory and task in the same PHP runtime. The MSSQL
-    # runner starts an isolated PHP container for each command.
-    probe = """
-$directory = sys_get_temp_dir() . '/autodbbackup-' . bin2hex(random_bytes(8));
-if (!mkdir($directory, 0700))
-{
-    throw new RuntimeException('Could not create the private backup fixture directory');
-}
-$old = $directory . '/backup_1600000000_picoautodbbackup1234567890abcdef.sql';
-$manual = $directory . '/backup_1600000001_1234567890abcdef.sql';
-$original = $config['auto_db_backup_directory'];
-$last = (int) $config['auto_db_backup_last_gc'];
-$anchor = time() - 3 * 3600 - 600;
-try
-{
-    file_put_contents($old, 'old fixture');
-    file_put_contents($manual, 'manual fixture');
-    $config->set('auto_db_backup_directory', $directory);
-    $config->set('auto_db_backup_last_gc', $anchor, false);
-    $task = $phpbb_container->get('cron.manager')->find_task('pico.autodbbackup.cron.task.auto_db_backup');
-    $ready = $task && $task->is_ready();
-    if ($ready)
-    {
-        $task->run();
+    # On MySQL and MariaDB the cron also optimizes fragmented tables first
+    optimize = "1" if isinstance(b, SeedBoard) and board_database(b) in ("mysql", "mariadb") else "0"
+    # Two hours from now, on the board's own clock
+    when = json.loads(b.php("echo json_encode(getdate(time() + 7200));"))
+    action, fields = form_fields(page.text, "acp_auto_db_backup")
+    body = post_back(admin, f"{b.base}/adm", page_url, action, {
+        **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "text",
+        "auto_db_backup_optimize": optimize, "auto_db_backup_gc": "2", "auto_db_backup_gc_unit": "hours",
+        "auto_db_backup_copies": "2", "auto_db_backup_day": str(when["mday"]),
+        "auto_db_backup_month": str(when["mon"]), "auto_db_backup_year": str(when["year"]),
+        "auto_db_backup_hour": str(when["hours"]), "auto_db_backup_minute": str(when["minutes"]),
+        "submit": "Submit"})
+    ok("Settings changed" in body or "settings changed" in body.lower(), "ACP saves the settings")
+    saved = {k: config(f"auto_db_backup_{k}") for k in ("enable", "gc", "gc_unit", "copies", "optimize")}
+    ok(saved == {"enable": "1", "gc": "7200", "gc_unit": "hours", "copies": "2", "optimize": optimize},
+       f"settings stored: {saved}")
+    chosen_start = int(b.php(f"echo mktime({when['hours']}, {when['minutes']}, 0, "
+                             f"{when['mon']}, {when['mday']}, {when['year']});", check=True))
+    ok(int(config("auto_db_backup_last_gc")) + 7200 == chosen_start,
+       "ACP saves the exact chosen backup start on the board's clock")
+
+    # A backup due in January must be selectable in December: next year is offered
+    page = admin.get(page_url, timeout=20)
+    ok(f'<option value="{when["year"] + 1}"' in page.text, "the next backup time offers next year too")
+    # A file type the server can't write is refused and leaves the setting alone
+    action, fields = form_fields(page.text, "acp_auto_db_backup")
+    post_back(admin, f"{b.base}/adm", page_url, action, {
+        **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "zip",
+        "auto_db_backup_gc": "2", "auto_db_backup_gc_unit": "hours", "auto_db_backup_copies": "2",
+        "auto_db_backup_day": str(when["mday"]), "auto_db_backup_month": str(when["mon"]),
+        "auto_db_backup_year": str(when["year"]), "auto_db_backup_hour": str(when["hours"]),
+        "auto_db_backup_minute": str(when["minutes"]), "submit": "Submit"})
+    ok(config("auto_db_backup_filetype") == "text", "an unknown file type is refused")
+
+    # A manual backup that retention must leave alone
+    manual = "backup_1700000000_manualprobe00000000.sql"
+    if on_storage:
+        b.php(f"$s = $phpbb_container->get('storage.backup'); $s->write('{manual}', fopen('php://memory', 'rb'));"
+              f"$db->sql_query('INSERT INTO ' . BACKUPS_TABLE . \" (filename) VALUES ('{manual}')\");", check=True)
+    else:
+        b.php(f"file_put_contents($phpbb_root_path . 'store/{manual}', '-- probe');", check=True)
+
+    task = "phpbbmodders.autodbbackup.cron.task.auto_db_backup"
+    for run in range(3):
+        # Start several intervals late, away from a boundary, to detect cadence drift.
+        anchor = int(b.php("echo time() - 3 * 7200 - 600;", check=True)) if run == 0 else 0
+        b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'auto_db_backup_last_gc'",
+              (str(anchor),))
+        b.purge_cache()
+        if run == 0:
+            ready = b.php(f"$task = $phpbb_container->get('cron.manager')->find_task('{task}');"
+                          "echo json_encode($task && $task->is_ready());", check=True)
+            ok(json.loads(ready), "an overdue hourly backup is ready to run")
+        out = b.cli("cron:run", task)
+        ok("rror" not in out, f"cron run {run + 1} finished" + ("" if "rror" not in out else f": {out[-200:]}"))
+        if run == 0:
+            state = json.loads(b.php(
+                f"$task = $phpbb_container->get('cron.manager')->find_task('{task}');"
+                "echo json_encode([(int) $config['auto_db_backup_last_gc'], $task && $task->is_ready()]);",
+                check=True))
+            ok(state == [anchor + 3 * 7200, False], "a late hourly backup preserves its cadence and is no longer due")
+        time.sleep(1.1)  # a new second, so each backup's timestamp differs
+    auto = [f for f in backups() if marker in f]
+    ok(len(auto) == 2, f"retention keeps the newest 2 automatic backups ({len(auto)} left)")
+    ok(manual in backups(), "the manual backup is kept")
+    ok(int(config("auto_db_backup_last_gc")) > 0, "the next backup time moved on after the run")
+    logs = b.sql("SELECT COUNT(log_id) FROM phpbb_log WHERE log_operation = 'LOG_AUTO_DB_BACKUP'")
+    ok(logs and int(logs[0][0]) >= 3, "each run is logged in the admin log")
+
+    restore = admin.get(f"{b.base}/adm/index.php?i=acp_database&mode=restore&sid={sid}", timeout=20)
+    # ACP Restore lists each backup by the SHA-1 of its file name
+    ok(restore.ok and all(f'value="{hashlib.sha1(f.encode()).hexdigest()}"' in restore.text for f in auto),
+       "ACP Restore lists the automatic backups")
+
+    # Leave the board as it was: remove the probe and the backups this check made
+    for name in auto + [manual]:
+        if on_storage:
+            b.php(f"$phpbb_container->get('storage.backup')->delete('{name}');"
+                  f"$db->sql_query('DELETE FROM ' . BACKUPS_TABLE . \" WHERE filename = '{name}'\");")
+        else:
+            b.php(f"@unlink($phpbb_root_path . 'store/{name}');")
+    if b.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'auto_db_backup_directory'"):
+        check_autodbbackup_directory(b, admin, page_url, when, task, marker, backups, config)
+    b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_enable'")
+    b.purge_cache()
+
+
+def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: str, when: dict, task: str,
+                                 marker: str, backups: Callable, config: Callable) -> None:
+    """autodbbackup's optional private backup directory: ACP validation, cron writes there, retention, refusal."""
+    def save(directory: str) -> None:
+        action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_auto_db_backup")
+        post_back(admin, f"{b.base}/adm", page_url, action, {
+            **fields, "auto_db_backup_enable": "1", "auto_db_backup_filetype": "text",
+            "auto_db_backup_optimize": "0", "auto_db_backup_gc": "2", "auto_db_backup_gc_unit": "hours",
+            "auto_db_backup_copies": "2", "auto_db_backup_directory": directory,
+            "auto_db_backup_day": str(when["mday"]), "auto_db_backup_month": str(when["mon"]),
+            "auto_db_backup_year": str(when["year"]), "auto_db_backup_hour": str(when["hours"]),
+            "auto_db_backup_minute": str(when["minutes"]), "submit": "Submit"})
+
+    def custom_files(directory: str) -> list:
+        out = b.php(f"foreach (glob('{directory}/backup_*') as $f) {{ echo basename($f), \"\\n\"; }}")
+        return sorted(line for line in out.splitlines() if marker in line)
+
+    def run_cron(times: int) -> None:
+        for _ in range(times):
+            b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_last_gc'")
+            b.purge_cache()
+            b.cli("cron:run", task)
+            time.sleep(1.1)
+
+    # A private directory the PHP process owns, outside the board and any web root. On a
+    # seed-forum board it goes in BOARD_ROOT.outside (made by run_seed_board before the
+    # server starts), which board-php.py mounts into MSSQL driver containers; each of
+    # those has its own /tmp.
+    outside = b.root.with_name(b.root.name + ".outside") if isinstance(b, SeedBoard) else None
+    base = f"'{outside}'" if outside is not None and outside.is_dir() else "sys_get_temp_dir()"
+    directory = b.php(f"$d = {base} . '/adb-check-' . bin2hex(random_bytes(4));"
+                      "echo (mkdir($d, 0700) ? realpath($d) : '');").strip()
+    ok(directory, f"made a private test directory ({directory})")
+    if not directory:
+        return
+    try:
+        save(str(b.root / "store"))
+        ok(config("auto_db_backup_directory") == "", "ACP refuses a directory inside the board")
+        # A real private directory whose path is longer than phpBB's 255-character config column
+        long_dir = b.php(f"$d = '{directory}/' . str_repeat('a', 120) . '/' . str_repeat('b', 120);"
+                         "echo (mkdir($d, 0700, true) && chmod(dirname($d), 0700) ? realpath($d) : '');").strip()
+        if long_dir and len(long_dir) > 255:
+            save(long_dir)
+            ok(config("auto_db_backup_directory") == "", f"ACP refuses a {len(long_dir)}-character directory path")
+            b.php(f"@rmdir('{long_dir}'); @rmdir(dirname('{long_dir}'));")
+        save(directory)
+        ok(config("auto_db_backup_directory") == directory, "ACP saves a private directory outside the board")
+        before = backups()
+        run_cron(3)
+        ok(len(custom_files(directory)) == 2, f"backups go to the custom directory, newest 2 kept "
+                                              f"({len(custom_files(directory))} there)")
+        private = json.loads(b.php(
+            f"$files = glob('{directory}/backup_*{marker}*.sql'); $private = count($files) > 0;"
+            "foreach ($files as $file) { $private = $private && filesize($file) > 0 "
+            "&& (fileperms($file) & 0777) === 0600; } echo json_encode($private);", check=True))
+        ok(private, "custom backup archives are nonempty and have private 0600 permissions")
+        ok(backups() == before, "no backup is left in phpBB's own backup location")
+        # Opened to other users: refused at run time, logged, nothing written
+        b.php(f"chmod('{directory}', 0777);", check=True)
+        failed = int(b.sql("SELECT COUNT(log_id) FROM phpbb_log "
+                           "WHERE log_operation = 'LOG_AUTO_DB_BACKUP_DIRECTORY_FAILED'")[0][0])
+        kept = custom_files(directory)
+        run_cron(1)
+        ok(int(b.sql("SELECT COUNT(log_id) FROM phpbb_log "
+                     "WHERE log_operation = 'LOG_AUTO_DB_BACKUP_DIRECTORY_FAILED'")[0][0]) == failed + 1
+           and custom_files(directory) == kept, "a directory open to other users is refused and logged")
+    finally:
+        b.sql("UPDATE phpbb_config SET config_value = '' WHERE config_name = 'auto_db_backup_directory'")
+        b.php(f"array_map('unlink', glob('{directory}/*')); @rmdir('{directory}');")
+        b.purge_cache()
+
+
+def check_elonw(b: Board) -> None:
+    """Post external and same-site links, then check marking, new windows and the UCP setting in a browser."""
+    # Only this check needs a browser
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout, sync_playwright
+
+    forum = b.sql("SELECT forum_id FROM phpbb_posts WHERE post_id = 1")[0][0]
+    external = "https://example.org/elonw-probe"
+    internal = f"{b.base}/index.php"
+    admin = requests.Session()
+    sid = b.login(admin)
+    page_url = f"{b.base}/posting.php?mode=post&f={forum}&sid={sid}"
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "postform")
+    title = "elonw probe " + secrets.token_hex(4)  # unique, so a rerun on the same board reads its own topic
+    post_back(admin, b.base, page_url, action, {**fields, "subject": title, "post": "Submit",
+                                                "message": f"[url]{external}[/url] and [url]{internal}[/url]"})
+    topic = b.sql("SELECT topic_id FROM phpbb_topics WHERE topic_title = ?", (title,))
+    ok(topic, "the probe topic was posted")
+    if not topic:
+        return
+    topic_url = f"{b.base}/viewtopic.php?t={topic[0][0]}"
+    ok("elonw.js" in requests.get(topic_url, timeout=20).text, "guests get the script by default")
+
+    def external_stub(route) -> None:
+        """Answer every request to another host locally, so nothing leaves the machine."""
+        if route.request.url.startswith(b.base):
+            route.continue_()
+        else:
+            route.fulfill(status=200, content_type="text/html", body="<p>stub</p>")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(args=[
+            "--host-resolver-rules=MAP forum.tutorbrasil.com.br 127.0.0.1",
+            "--no-proxy-server",
+        ])
+        try:
+            context = browser.new_context()
+            context.route("**/*", external_stub)
+            context.add_cookies([{"name": c.name, "value": c.value, "url": b.base} for c in admin.cookies])
+            page = context.new_page()
+            page.goto(topic_url)
+            ext_link = page.locator(f'.content a[href="{external}"]').first
+            int_link = page.locator(f'.content a[href="{internal}"]').first
+            ok("elonw" in (ext_link.get_attribute("class") or "") and ext_link.get_attribute("title"),
+               "an external link in a post is marked, with a tooltip")
+            hidden = ext_link.locator(".elonw-sr-only")
+            ok(hidden.count() == 1 and hidden.inner_text().strip() == ext_link.get_attribute("title"),
+               "the marked link carries the same text for screen readers")
+            ok("elonw" not in (int_link.get_attribute("class") or ""), "a link to the board itself is not marked")
+            # A script-driven link is left alone, and does not stop later external links (old NotInClass bug)
+            page.evaluate("""() => { const a = document.createElement('a'); a.id = 'elonw-ignored';
+                a.href = 'https://example.net/'; a.className = 'lightbox'; a.textContent = 'x';
+                a.setAttribute('onclick', 'return false'); document.body.appendChild(a); }""")
+            pages_before = len(context.pages)
+            page.click("#elonw-ignored")
+            page.wait_for_timeout(500)
+            ok(len(context.pages) == pages_before and page.url.startswith(topic_url),
+               "a script-driven external link is left alone")
+            try:
+                with context.expect_page(timeout=5000) as popup:
+                    ext_link.click()
+                opened = popup.value.url.startswith(external) and page.url.startswith(topic_url)
+                popup.value.close()
+            except PlaywrightTimeout:
+                opened = False
+                page.goto(topic_url)
+            ok(opened, "an external link opens in a new window, also after a script-driven link was clicked")
+            page.click(f'.content a[href="{internal}"]')
+            page.wait_for_load_state()
+            ok(len(context.pages) == 1 and page.url.startswith(internal),
+               "a link to the board itself opens in the same window")
+            check_elonw_public_suffix(b, browser)
+        finally:
+            browser.close()
+
+    # The UCP setting: off removes the script, and any other value than 0 is stored as 1
+    ucp = f"{b.base}/ucp.php?i=ucp_prefs&mode=personal&sid={sid}"
+    for value, stored in (("0", "0"), ("-1", "1"), ("1", "1")):
+        page = admin.get(ucp, timeout=20).text
+        if value == "0":
+            ok('name="elonw"' in page, "the UCP shows the setting")
+        action, fields = form_fields(page, "ucp")
+        # Send back every other setting as the form shows it
+        current = {}
+        for name, options in re.findall(r'(?s)<select[^>]*name="([^"]+)"[^>]*>(.*?)</select>', page):
+            chosen = re.search(r'<option[^>]*value="([^"]*)"[^>]*selected', options)
+            if chosen:
+                current[name] = chosen.group(1)
+        current.update(re.findall(r'<input[^>]*type="text"[^>]*name="([^"]+)"[^>]*value="([^"]*)"', page))
+        current.update(re.findall(r'<input[^>]*type="radio"[^>]*name="([^"]+)"[^>]*value="([^"]*)"[^>]*checked', page))
+        # phpBB 3.3 selects the timezone with JavaScript, so the page marks none of them
+        current["tz"] = b.sql("SELECT user_timezone FROM phpbb_users WHERE user_id = 2")[0][0] or "UTC"
+        post_back(admin, b.base, ucp, action, {**fields, **current, "elonw": value, "submit": "Submit"})
+        saved = b.sql("SELECT user_elonw FROM phpbb_users WHERE user_id = 2")
+        ok(saved and str(saved[0][0]) == stored, f"the UCP stores {value} as {stored}")
+        if value == "0":
+            ok("elonw.js" not in admin.get(topic_url, timeout=20).text, "turning it off removes the script")
+
+
+def check_elonw_public_suffix(b: Board, browser) -> None:
+    """Classify same-suffix sites using the board's assets and exercise delegated clicks."""
+    base = f"http://forum.tutorbrasil.com.br:{b.port}/"
+    external = "https://noic.com.br/probe"
+    internal = "https://www.tutorbrasil.com.br/probe"
+    fixture = f"""<div class="content" id="elonw-probe">
+        <a id="elonw-external" href="{external}">External link</a>
+        <a id="elonw-internal" href="{internal}">Internal link</a>
+        <a id="elonw-forum" class="forum_link" href="{external}">External forum link</a>
+        </div>"""
+
+    def local_only(route) -> None:
+        """Serve board assets normally and answer other origins without network access."""
+        if route.request.url.startswith(base):
+            route.continue_()
+        else:
+            route.fulfill(status=200, content_type="text/html", body="<p>stub</p>")
+
+    context = browser.new_context()
+    try:
+        context.route("**/*", local_only)
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.add_init_script(f"""
+            window.elonwProbeOpens = [];
+            window.open = (url) => window.elonwProbeOpens.push(url);
+            document.addEventListener('DOMContentLoaded', () => {{
+                document.body.insertAdjacentHTML('beforeend', {json.dumps(fixture)});
+                document.querySelector('#elonw-probe').addEventListener('click', (event) => event.preventDefault());
+            }});
+        """)
+        response = page.goto(base + "index.php", wait_until="load", timeout=30000)
+        ok(response and response.ok, "board index loads on the public-suffix fixture host")
+        page.locator("#elonw-probe").wait_for()
+        page.wait_for_function("() => window.jQuery && window.jQuery.isReady")
+        # Run after the extension's jQuery-ready callback has classified the fixture.
+        page.evaluate("() => new Promise(resolve => window.jQuery(() => resolve()))")
+        ok(page.locator("#elonw-external.elonw").count() == 1, "unrelated .com.br link is marked external")
+        ok(page.locator("#elonw-internal.elonw").count() == 0, "same-site subdomain is unmarked")
+        page.locator("#elonw-external").click()
+        page.locator("#elonw-internal").click()
+        ok(page.evaluate("window.elonwProbeOpens") == [external],
+           "only the unrelated .com.br site opens a new window")
+        page.locator("#elonw-forum").click()
+        ok(page.evaluate("window.elonwProbeOpens") == [external, external],
+           "an unrelated .com.br forum link opens a new window")
+        ok(not errors, "no public-suffix fixture JavaScript errors" + (f": {errors[0]}" if errors else ""))
+    finally:
+        context.close()
+
+
+def check_seenotes(b: Board) -> None:
+    """Set up a reason, give it to a member with BBCode notes, and check who sees the reason line where."""
+    poster = b.sql("SELECT p.post_id, p.topic_id, p.poster_id, u.username FROM phpbb_posts p "
+                   "JOIN phpbb_users u ON u.user_id = p.poster_id WHERE p.poster_id NOT IN (1, 2) "
+                   "AND p.post_visibility = 1 ORDER BY p.post_id")
+    ok(poster, "the board has a post by a member other than the admin")
+    if not poster:
+        return
+    post_id, topic_id, member_id, member_name = poster[0]
+    starters = [row[0] for row in b.sql("SELECT reason_title FROM phpbb_seenotes_reasons ORDER BY reason_order")]
+    ok(starters[:7] == ["Moderation queue", "Spam watch", "Warez", "Conduct", "Possible returning member",
+                        "Staff in contact", "General"], "enabling the extension adds the seven starter reasons")
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    acp = f"{b.base}/adm/index.php?i=-phpbbmodders-seenotes-acp-main_module&sid={sid}"
+
+    # ACP: settings, then a reason; a missing description is refused while required
+    page_url = f"{acp}&mode=settings"
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_settings")
+    post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "seenotes_label": "STAFF NOTE",
+              "seenotes_require_description": "1", "seenotes_allow_hard_delete": "1", "submit": "Submit"})
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name LIKE 'seenotes_%'"))
+    ok(saved.get("seenotes_label") == "STAFF NOTE" and saved.get("seenotes_allow_hard_delete") == "1",
+       "the ACP settings are saved")
+    title = "Queue " + secrets.token_hex(3)
+    page_url = f"{acp}&mode=reasons&action=add"
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_reason")
+    body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "reason_title": title,
+                     "reason_description": "", "reason_color": "#0055aa", "submit": "Submit"})
+    ok("Enter a description" in body and not b.sql("SELECT 1 FROM phpbb_seenotes_reasons WHERE reason_title = ?",
+                                                    (title,)), "a reason without the required description is refused")
+    action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_reason")
+    post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "reason_title": title,
+              "reason_description": "Approve first", "reason_color": "#0055aa", "submit": "Submit"})
+    reason = b.sql("SELECT reason_id, reason_color FROM phpbb_seenotes_reasons WHERE reason_title = ?", (title,))
+    ok(reason and reason[0][1] == "0055AA", "the ACP adds a reason with its color")
+    if not reason:
+        return
+    reason_id = reason[0][0]
+
+    # MCP: give the member the reason, then write a note with a quote
+    mcp = (f"{b.base}/mcp.php?i=-phpbbmodders-seenotes-mcp-main_module&mode=notes&u={member_id}&sid={sid}")
+    action, fields = form_fields(admin.get(mcp, timeout=20).text, "seenotes-add-entry")
+    post_back(admin, b.base, mcp, action, {**fields, "reason_id": str(reason_id), "entry_current": "1"})
+    entry = b.sql("SELECT entry_id, entry_current FROM phpbb_seenotes_entries WHERE user_id = ? AND reason_id = ?",
+                  (member_id, reason_id))
+    ok(entry and str(entry[0][1]) == "1", "the MCP gives the member the reason as current")
+    if not entry:
+        return
+    entry_id = entry[0][0]
+    page = admin.get(mcp, timeout=20).text
+    ok('id="message"' in page and "bbstyle(" in page, "the note form has the BBCode buttons")
+    action, fields = form_fields(page, "postform")
+    note = '[quote="admin"]Please stop double posting.[/quote]Sent as a PM.'
+    post_back(admin, b.base, mcp, action, {**fields, "entry_id": str(entry_id), "message": note,
+              "submit_note": "Save note"})
+    stored = b.sql("SELECT note_id, note_text FROM phpbb_seenotes_notes WHERE entry_id = ?", (entry_id,))
+    ok(stored and "<QUOTE" in stored[0][1], "the note is stored with its quote parsed")
+    if not stored:
+        return
+    note_id = stored[0][0]
+    page = admin.get(mcp, timeout=20).text
+    ok("<blockquote" in page and "Please stop double posting." in page, "the MCP shows the note's quote")
+
+    # Edit, then the reason line for staff, and not for guests or members
+    edit_url = f"{mcp}&action=edit_note&note_id={note_id}"
+    action, fields = form_fields(admin.get(edit_url, timeout=20).text, "postform")
+    post_back(admin, b.base, edit_url, action, {**fields, "message": note + " Edited.", "submit_note": "Save note"})
+    edited = b.sql("SELECT note_edit_user_name FROM phpbb_seenotes_notes WHERE note_id = ?", (note_id,))
+    ok(edited and edited[0][0] == "admin", "editing a note records who edited it")
+    pages = {
+        "the topic page": f"{b.base}/viewtopic.php?t={topic_id}",
+        "the profile": f"{b.base}/memberlist.php?mode=viewprofile&u={member_id}",
+        "the MCP post details": f"{b.base}/mcp.php?i=main&mode=post_details&p={post_id}&sid={sid}",
+        "the MCP topic view": f"{b.base}/mcp.php?i=main&mode=topic_view&t={topic_id}&sid={sid}",
     }
-    $files = glob($directory . '/*_picoautodbbackup*.sql');
-    echo json_encode([
-        $ready,
-        count($files) === 1 && $files[0] !== $old && filesize($files[0]) > 0
-            && (fileperms($files[0]) & 0777) === 0600,
-        !file_exists($old) && is_file($manual),
-        (int) $config['auto_db_backup_last_gc'] === $anchor + 3 * 3600 && !$task->is_ready(),
-    ], JSON_THROW_ON_ERROR);
-}
-finally
-{
-    $config->set('auto_db_backup_directory', $original);
-    $config->set('auto_db_backup_last_gc', $last, false);
-    foreach (glob($directory . '/*') as $file)
-    {
-        unlink($file);
-    }
-    rmdir($directory);
-}
-"""
-    observed = json.loads(b.php(probe, check=True))
-    for result, label in zip(observed, (
-        "hourly task becomes due",
-        "extractor publishes a private nonempty archive",
-        "retention removes the old automatic backup and keeps the manual file",
-        "late backup keeps its hourly cadence",
-    ), strict=True):
-        ok(result, label)
+    for where, url in pages.items():
+        html = admin.get(url, timeout=20).text
+        ok("STAFF NOTE" in html and title in html and "(1)" in html, f"staff see the reason line on {where}")
+    password = "Pw-" + secrets.token_hex(8)
+    viewer_name = "seenotes_viewer_" + secrets.token_hex(3)
+    viewer_id = b.add_user(viewer_name, password)
+    viewer = requests.Session()
+    b.login(viewer, viewer_name, password)
+    for who, session in (("guests", requests.Session()), ("members", viewer)):
+        html = session.get(pages["the topic page"], timeout=20).text + \
+            session.get(pages["the profile"], timeout=20).text
+        ok(title not in html and "STAFF NOTE" not in html, f"{who} do not see the reason line")
+        ok("seenotes-mcp-main_module" not in html, f"{who} get no notes button or profile link")
+
+    # ACP > Manage users shows the same records
+    users = f"{b.base}/adm/index.php?i=users&mode=seenotes&u={member_id}&sid={sid}"
+    html = admin.get(users, timeout=20).text
+    ok(title in html and "Please stop double posting." in html, "ACP Manage users shows the reasons and notes")
+
+    # Delete the note through the confirm box, then log entries
+    delete_url = f"{mcp}&action=delete_note&note_id={note_id}"
+    action, fields = form_fields(admin.get(delete_url, timeout=20).text, "confirm")
+    post_back(admin, b.base, delete_url, action, {**fields, "confirm": "Yes"})
+    ok(not b.sql("SELECT 1 FROM phpbb_seenotes_notes WHERE note_id = ?", (note_id,)),
+       "deleting a note asks to confirm, then deletes it")
+    logged = {row[0] for row in b.sql("SELECT log_operation FROM phpbb_log WHERE log_operation LIKE 'LOG_SEENOTES_%'")}
+    ok({"LOG_SEENOTES_ENTRY_ADDED", "LOG_SEENOTES_NOTE_ADDED", "LOG_SEENOTES_NOTE_EDITED",
+        "LOG_SEENOTES_NOTE_DELETED", "LOG_SEENOTES_REASON_ADDED"} <= logged, "every change is logged")
+
+    # Deleting a member deletes the records about them
+    b.php(f"$e = $phpbb_container->get('phpbbmodders.seenotes.manager')->add_entry({viewer_id}, {reason_id}, true);"
+          f"user_delete('remove', {viewer_id});", check=True)
+    ok(not b.sql("SELECT 1 FROM phpbb_seenotes_entries WHERE user_id = ?", (viewer_id,)),
+       "deleting a member deletes their entries")
+
+    # Hard delete: two screens, the reason's name typed; a wrong name deletes nothing
+    page_url = f"{acp}&mode=reasons&action=delete&id={reason_id}"
+
+    def delete_with_name(name: str) -> str:
+        """Go through both delete screens, typing a name on the second; return the second screen."""
+        action, fields = form_fields(admin.get(page_url, timeout=20).text, "acp_seenotes_delete")
+        step2 = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "submit": "Continue"})
+        action, fields = form_fields(step2, "acp_seenotes_delete")
+        post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "confirm_name": name, "submit": "Delete"})
+        return step2
+
+    ok('name="confirm_name"' in delete_with_name("wrong"), "the second delete screen asks for the reason's name")
+    ok(b.sql("SELECT 1 FROM phpbb_seenotes_reasons WHERE reason_id = ?", (reason_id,)),
+       "a wrong name deletes nothing")
+    delete_with_name(title)
+    ok(not b.sql("SELECT 1 FROM phpbb_seenotes_reasons WHERE reason_id = ?", (reason_id,))
+       and not b.sql("SELECT 1 FROM phpbb_seenotes_entries WHERE reason_id = ?", (reason_id,)),
+       "typing the name deletes the reason with its entries")
+
+    # Without a current reason nothing shows, but staff keep the notes button and profile link,
+    # which open the Give a reason form; members and guests get neither
+    topic = admin.get(pages["the topic page"], timeout=20).text
+    profile = admin.get(pages["the profile"], timeout=20).text
+    ok("STAFF NOTE" not in profile, "a member without a current reason shows no reason line")
+    to_form = r'href="[^"]*mode=notes&amp;u=%s[^"]*#seenotes-add-entry"' % member_id
+    ok(re.search(r'<a %s[^>]*class="button button-icon-only"' % to_form, topic),
+       "the notes button next to the member's post opens the Give a reason form")
+    ok(re.search(r'<dd><a %s>' % to_form, profile), "the profile's Moderator notes link opens the Give a reason form")
+
+
+def check_prunenotifications(b: Board) -> None:
+    """Prune a dormant member's notifications from the ACP in batches and by cron, and optimize the table."""
+    def config(name: str) -> str:
+        rows = b.sql("SELECT config_value FROM phpbb_config WHERE config_name = ?", (name,))
+        return rows[0][0] if rows else ""
+
+    def notifications(user_id: int) -> int:
+        return int(b.sql("SELECT COUNT(notification_id) FROM phpbb_notifications WHERE user_id = ?", (user_id,))[0][0])
+
+    def add_notifications(user_id: int, count: int) -> None:
+        b.php("for ($i = 0; $i < %d; $i++) { $db->sql_query('INSERT INTO ' . NOTIFICATIONS_TABLE . ' '"
+              " . $db->sql_build_array('INSERT', ['notification_type_id' => 1, 'item_id' => $i + 1,"
+              " 'item_parent_id' => 0, 'user_id' => %d, 'notification_read' => 0, 'notification_time' => 1000,"
+              " 'notification_data' => ''])); }" % (count, user_id), check=True)
+
+    def logged(operation: str) -> int:
+        return int(b.sql("SELECT COUNT(log_id) FROM phpbb_log WHERE log_operation = ?", (operation,))[0][0])
+
+    def follow_refresh(body: str) -> tuple:
+        """Follow the ACP's meta refreshes through the prune batches; return (last page, requests)."""
+        requests_made = 1
+        while requests_made <= 20:
+            m = re.search(r'http-equiv="refresh" content="\d+;\s*url=([^"]+)"', body)
+            if not m:
+                break
+            url = m.group(1).replace("&amp;", "&")
+            body = admin.get(url if url.startswith("http") else f"{b.base}/adm/" + url.lstrip("./"), timeout=60).text
+            requests_made += 1
+        return body, requests_made
+
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    mid = b.sql("SELECT module_id FROM phpbb_modules WHERE module_basename LIKE '%prunenotifications%' "
+                "AND module_mode = 'settings'")
+    ok(mid, "ACP module is installed")
+    if not mid:
+        return
+    page_url = f"{b.base}/adm/index.php?i={mid[0][0]}&mode=settings&sid={sid}"
+    page = admin.get(page_url, timeout=20)
+    ok(page.ok and 'id="prunenotifications_settings"' in page.text, "ACP page loads")
+
+    # A member who last visited long ago, and the admin as an active member
+    candidates = b.sql("SELECT user_id, user_lastvisit, user_regdate FROM phpbb_users "
+                       "WHERE user_type IN (0, 1) AND user_id <> 2 ORDER BY user_id")
+    ok(candidates, "the board has a member to make dormant")
+    if not candidates:
+        return
+    dormant, old_lastvisit, old_regdate = int(candidates[0][0]), candidates[0][1], candidates[0][2]
+    b.sql("UPDATE phpbb_users SET user_lastvisit = 1000, user_regdate = 1000 WHERE user_id = ?", (dormant,))
+    try:
+        add_notifications(dormant, 250)
+        add_notifications(2, 5)
+        admin_before = notifications(2)
+
+        # Settings: two years, batches of 100, optimize after pruning
+        action, fields = form_fields(page.text, "prunenotifications_settings")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {
+            **fields, "prunenotifications_days": "730", "prunenotifications_batch": "100",
+            "prunenotifications_cron_enable": "0", "prunenotifications_auto_optimize": "1", "submit": "Submit"})
+        ok("settings saved" in body.lower(), "ACP saves the settings")
+        saved = {k: config(f"prunenotifications_{k}") for k in ("days", "batch", "cron_enable", "auto_optimize")}
+        ok(saved == {"days": "730", "batch": "100", "cron_enable": "0", "auto_optimize": "1"}, f"settings stored: {saved}")
+
+        # Out-of-range values are refused
+        page = admin.get(page_url, timeout=20)
+        action, fields = form_fields(page.text, "prunenotifications_settings")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {
+            **fields, "prunenotifications_days": "1", "prunenotifications_batch": "100",
+            "prunenotifications_cron_enable": "0", "prunenotifications_auto_optimize": "1", "submit": "Submit"})
+        ok("must be from" in body and config("prunenotifications_days") == "730", "an out-of-range period is refused")
+
+        page = admin.get(page_url, timeout=20)
+        ok(re.search(r"<strong>2\d\d</strong>", page.text), "the page counts the dormant member's notifications")
+
+        # Prune now: confirm, then three batches of up to 100
+        action, fields = form_fields(page.text, "prunenotifications_actions")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "prune": "Prune now"})
+        ok('id="confirm"' in body, "Prune now asks for confirmation")
+        action, fields = form_fields(body, "confirm")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "confirm": "Yes"})
+        body, requests_made = follow_refresh(body)
+        ok("form was invalid" not in body.lower(), f"no 'invalid form' error ({requests_made} requests)")
+        ok(requests_made >= 3, f"the prune ran in batches ({requests_made} requests)")
+        ok(notifications(dormant) == 0, f"the dormant member's notifications are gone ({notifications(dormant)} left)")
+        ok(notifications(2) == admin_before, "the active member's notifications are kept")
+        ok(logged("LOG_PRUNENOTIFICATIONS_PRUNED") >= 1, "the prune is in the admin log")
+        ok(logged("LOG_PRUNENOTIFICATIONS_OPTIMIZED") >= 1 and int(config("prunenotifications_last_optimize")) > 0,
+           "the table was optimized after pruning" + ("" if "optimized" in body else f": {page_text(body)[-200:]}"))
+
+        # Optimize now, from its own button
+        page = admin.get(page_url, timeout=20)
+        action, fields = form_fields(page.text, "prunenotifications_actions")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "optimize": "Optimize now"})
+        action, fields = form_fields(body, "confirm")
+        body = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "confirm": "Yes"})
+        ok("table was optimized" in body, "Optimize now works on this database"
+           + ("" if "table was optimized" in body else f": {page_text(body)[-200:]}"))
+
+        # Cron: a full batch, then the rest with one log entry
+        add_notifications(dormant, 150)
+        b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'prunenotifications_cron_enable'")
+        task = "cron.task.phpbbmodders.prunenotifications.prune"
+        for run in range(2):
+            b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'prunenotifications_next_run'")
+            b.purge_cache()
+            out = b.cli("cron:run", task)
+            ok("rror" not in out, f"cron run {run + 1} finished" + ("" if "rror" not in out else f": {out[-200:]}"))
+        ok(notifications(dormant) == 0, f"cron deleted the rest ({notifications(dormant)} left)")
+        ok(logged("LOG_PRUNENOTIFICATIONS_CRON") == 1, "cron logs once, after the backlog is cleared")
+        ok(int(config("prunenotifications_next_run")) > int(b.php("echo time();")) + 3600,
+           "cron waits a day once nothing is left")
+    finally:
+        b.sql("DELETE FROM phpbb_notifications WHERE notification_time = 1000 AND user_id IN (?, 2)", (dormant,))
+        b.sql("UPDATE phpbb_users SET user_lastvisit = ?, user_regdate = ? WHERE user_id = ?",
+              (old_lastvisit, old_regdate, dormant))
+        b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name IN "
+              "('prunenotifications_cron_enable', 'prunenotifications_auto_optimize')")
+        b.purge_cache()
 
 
 CHECKS = {
-    "pico/autodbbackup": check_autodbbackup,
+    "phpbbmodders/prunenotifications": check_prunenotifications,
+    "phpbbmodders/seenotes": check_seenotes,
+    "phpbbmodders/autodbbackup": check_autodbbackup,
+    "phpbbmodders/elonw": check_elonw,
+    "phpbbmodders/genders": check_genders,
     "rmcgirr83/activity24hours": check_activity24hours,
     "phpbbmodders/contactadmin": check_contactadmin,
     "phpbbmodders/useridviewtopic": check_useridviewtopic,
@@ -735,8 +1569,15 @@ def run_seed_board(args: argparse.Namespace) -> int:
             ok(False, f"{ext} is not enabled on the board; enable it with seed-forum")
             continue
         if ext in CHECKS:
-            with board.serve():
-                CHECKS[ext](board)
+            # A writable directory outside the board, made before the server starts so
+            # seed-forum's board-php.py mounts it into an MSSQL board's containers too
+            outside = board.root.with_name(board.root.name + ".outside")
+            outside.mkdir(mode=0o700, exist_ok=True)
+            try:
+                with board.serve():
+                    CHECKS[ext](board)
+            finally:
+                shutil.rmtree(outside, ignore_errors=True)
             errors = board.php_errors()
             ok(not errors, "no PHP errors logged" + (f": {errors[0][:200]}" if errors else ""))
         else:

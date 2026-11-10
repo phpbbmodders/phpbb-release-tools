@@ -1127,8 +1127,249 @@ def shots_posteripinviewtopic(board: Board, shoot: Shooter, args: argparse.Names
     shoot.shot("posteripinviewtopic-lookup", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True, prepare=look_up)
 
 
+def shots_elonw(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/elonw: a post with an external link, marked with the new-window icon, next to a link
+    to the board itself, and the setting in the UCP.
+
+    Needs a board with posts: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. The first post of the busiest topic is
+    rewritten to hold both links.
+    """
+    _, topic = busiest_forum_and_topic(board)
+    post = board.sql("SELECT topic_first_post_id FROM phpbb_topics WHERE topic_id = ?", (topic,))[0][0]
+    text = ("Version 2.0 is out. The full release notes are on the "
+            "[url=https://www.example.org/releases/2.0]project site[/url], and questions about the "
+            f"update go in our [url={board.base}/viewforum.php?f=2]support forum[/url].")
+    board.php("$t = " + php_string(text) + "; $uid = $bit = ''; $flags = 0;"
+              "generate_text_for_storage($t, $uid, $bit, $flags, true, true, true);"
+              "$db->sql_query('UPDATE ' . POSTS_TABLE . ' SET ' . $db->sql_build_array('UPDATE', "
+              "['post_text' => $t, 'bbcode_uid' => $uid, 'bbcode_bitfield' => $bit]) . ' WHERE post_id = "
+              + str(int(post)) + "');", check=True)
+    board.purge_cache()
+    shoot.shot("elonw-post-links", f"viewtopic.php?t={topic}", selector=f"#p{post}")
+    shoot.shot("elonw-ucp-setting", "ucp.php?i=ucp_prefs&mode=personal&sid={sid}", admin=True,
+               selector="form#ucp")
+
+
+def shots_genders(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/genders: the gender selector, genders on posts and profiles, and the ACP settings.
+
+    Needs a board with posts by several members: run with --seed and
+    seed-forum's bin/seed-standard-fixtures.php. Every member gets a gender,
+    cycling through the first few choices. genders-ucp-profile,
+    genders-viewtopic, genders-profile and genders-acp-settings use the
+    default settings (icon only, User Statistics). genders-viewtopic-text,
+    genders-profile-details and genders-acp-settings-changed show the
+    1.4.0-dev settings: gender text before the icon, the phpBB 3.0 MOD
+    prosilver icon set, and gender in the main profile details.
+    """
+    users = [row[0] for row in board.sql("SELECT user_id FROM phpbb_users WHERE user_type IN (0, 3) ORDER BY user_id")]
+    for n, user_id in enumerate(users):
+        board.sql("UPDATE phpbb_users SET user_gender = ? WHERE user_id = ?", (n % 4 + 1, user_id))
+    board.sql("UPDATE phpbb_users SET user_gender = 2 WHERE user_id = 2")
+    board.purge_cache()
+    _, topic = busiest_forum_and_topic(board)
+    acp = "adm/index.php?i=-phpbbmodders-genders-acp-settings_module&mode=settings&sid={sid}"
+
+    def first_posts(p) -> None:
+        # Keep the title and the first three posts
+        p.add_style_tag(content="#page-body > .post:nth-of-type(n+4) ~ *:not(.action-bar.bar-top),"
+                                "#page-body > .post:nth-of-type(n+4) { display: none; }")
+    shoot.shot("genders-ucp-profile", "ucp.php?i=ucp_profile&mode=profile_info&sid={sid}", admin=True,
+               selector="form#ucp")
+    shoot.shot("genders-viewtopic", f"viewtopic.php?t={topic}", selector="#page-body", prepare=first_posts)
+    shoot.shot("genders-profile", "memberlist.php?mode=viewprofile&u=2&sid={sid}", admin=True, selector="#page-body")
+    shoot.shot("genders-acp-settings", acp, admin=True, full_page=True)
+
+    set_config(board, {"genders_show_text": "1", "genders_icon_set": "prosilver", "genders_profile_details": "1"})
+    shoot.shot("genders-viewtopic-text", f"viewtopic.php?t={topic}", selector="#page-body", prepare=first_posts)
+    shoot.shot("genders-profile-details", "memberlist.php?mode=viewprofile&u=2&sid={sid}", admin=True,
+               selector="#page-body")
+    shoot.shot("genders-acp-settings-changed", acp, admin=True, full_page=True)
+
+
+def shots_adduser(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/adduser: the Add User page, the CSV check page and the admin-copy setting.
+
+    Board email is on and the new-member post limit is set, so every option
+    shows; nothing is created or sent. adduser-add-user has Global
+    moderators chosen as the group, so the default-group choice offers it.
+    adduser-csv-check is the check page for a small file with one row of
+    each kind of problem. adduser-acp-admin-copy is the User registration
+    settings section that holds the admin-copy setting.
+    """
+    set_config(board, {"email_enable": "1", "require_activation": "0", "new_member_post_limit": "3",
+                       "allow_birthdays": "1"})
+    acp = "adm/index.php?i=-phpbbmodders-adduser-acp-adduser_module&mode={mode}&sid={sid}"
+    csv_file = board.root / "store" / "adduser-screenshot.csv"
+    csv_file.write_text("username,email,password,lang,birthday\n"
+                        "Jane Doe,jane@example.com,,en,14-02-1990\n"
+                        "John Smith,john@example.com,,,\n"
+                        "Maria Garcia,maria@example.com,Correct-horse-42,en,\n"
+                        "Jane Doe,jane.doe@example.com,,,\n"
+                        "Sam Lee,not-an-email,,,31-02-1995\n")
+    shoot.cleanup.append(csv_file)
+
+    def choose_group(p) -> None:
+        p.select_option("#group", label="Global moderators")
+        p.locator("label.default_group").wait_for(state="visible")
+        p.wait_for_timeout(400)
+
+    def check_rows(p) -> None:
+        p.set_input_files("#csv_file", str(csv_file))
+        p.click("input[name=preview]")
+        p.locator("table.table1").first.wait_for()
+
+    shoot.shot("adduser-add-user", acp.replace("{mode}", "main"), admin=True, full_page=True, prepare=choose_group)
+    shoot.shot("adduser-csv-check", acp.replace("{mode}", "csv"), admin=True, full_page=True, prepare=check_rows)
+    shoot.shot("adduser-acp-admin-copy", "adm/index.php?i=acp_board&mode=registration&sid={sid}", admin=True,
+               selector='fieldset:has(input[name="config[adduser_admin_copy]"])')
+
+
+def shots_autodbbackup(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/autodbbackup: the ACP settings and its backups in ACP Restore.
+
+    autodbbackup-acp-settings shows daily gzip backups keeping seven copies.
+    autodbbackup-acp-restore is phpBB's Restore page after the backup cron
+    has run twice; the backups it made are deleted afterwards.
+    autodbbackup-update-settings and -update-directory-error are the
+    11/07/2026 update gallery: a six-hour schedule with a custom backup
+    directory, and the error for a directory inside the board.
+    """
+    set_config(board, {"auto_db_backup_enable": "1", "auto_db_backup_filetype": "gzip",
+                       "auto_db_backup_gc": "86400", "auto_db_backup_gc_unit": "days",
+                       "auto_db_backup_copies": "7"})
+    acp = "adm/index.php?i=-phpbbmodders-autodbbackup-acp-auto_db_backup_module&mode=settings&sid={sid}"
+    shoot.shot("autodbbackup-acp-settings", acp, admin=True, full_page=True)
+
+    before = set((board.root / "store").glob("backup_*"))
+    for _ in range(2):
+        board.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_last_gc'")
+        board.purge_cache()
+        board.cli("cron:run", "phpbbmodders.autodbbackup.cron.task.auto_db_backup")
+        time.sleep(1.1)  # a new second, so the two backups get different times
+    shoot.cleanup.extend(set((board.root / "store").glob("backup_*")) - before)
+    shoot.shot("autodbbackup-acp-restore", "adm/index.php?i=acp_database&mode=restore&sid={sid}", admin=True,
+               selector="#main")
+
+    # The 11/07/2026 update gallery: an hourly schedule with a custom backup directory,
+    # and the error for a directory inside the board (needs the directory setting)
+    if board.sql("SELECT 1 FROM phpbb_config WHERE config_name = 'auto_db_backup_directory'"):
+        # Last run now, so the next backup time shown is six hours ahead, not in the past
+        set_config(board, {"auto_db_backup_gc": "21600", "auto_db_backup_gc_unit": "hours",
+                           "auto_db_backup_last_gc": str(int(time.time())),
+                           "auto_db_backup_directory": "/var/backups/phpbb"})
+        shoot.shot("autodbbackup-update-settings", acp, admin=True, full_page=True)
+        set_config(board, {"auto_db_backup_directory": ""})
+
+        def public_directory(p) -> None:
+            p.fill("#auto_db_backup_directory", str(board.root / "store"))
+            p.wait_for_timeout(1200)  # phpBB's minimum time before a form may be submitted
+            p.click("#submit")
+            p.locator(".errorbox").wait_for()
+        shoot.shot("autodbbackup-update-directory-error", acp, admin=True, full_page=True, prepare=public_directory)
+
+
+def shots_seenotes(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/seenotes: the reason line next to a post and on a profile, the notes button
+    next to a post by a member without a reason, the MCP post notice, MCP → Moderator notes, and
+    the ACP pages.
+
+    Needs seed-forum's fixtures: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php; seed-forum's bin/seed-seenotes-fixtures.php,
+    next to it, then gives the members reasons, notes and warnings. Reasons are
+    only shown to staff, so every shot is taken as the admin.
+    """
+    if not args.seed:
+        raise RuntimeError("run with --seed and seed-forum's bin/seed-standard-fixtures.php")
+    fixtures = Path(args.seed).resolve().parent / "seed-seenotes-fixtures.php"
+    seeded = subprocess.run(["php", "-d", "opcache.enable_cli=0", str(fixtures), str(board.root)],
+                            capture_output=True, text=True)
+    if seeded.returncode != 0:
+        raise RuntimeError(f"See Notes fixtures failed: {(seeded.stderr or seeded.stdout).strip()[-300:]}")
+    board.purge_cache()
+
+    alex = board.sql("SELECT user_id FROM phpbb_users WHERE username = 'forum_alex'")[0][0]
+    drew = board.sql("SELECT user_id FROM phpbb_users WHERE username = 'forum_drew'")[0][0]
+    post = board.sql("SELECT post_id FROM phpbb_posts WHERE poster_id = ? ORDER BY post_time DESC LIMIT 1", (alex,))[0][0]
+    topic = board.sql("SELECT topic_id FROM phpbb_posts WHERE post_id = ?", (post,))[0][0]
+    mcp = "mcp.php?i=-phpbbmodders-seenotes-mcp-main_module&mode=notes&u={user}&sid={{sid}}"
+    acp = "adm/index.php?i=-phpbbmodders-seenotes-acp-main_module&mode={mode}&sid={{sid}}"
+    shoot.shot("seenotes-viewtopic", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True, selector=f"#p{post}")
+    shoot.shot("seenotes-profile", f"memberlist.php?mode=viewprofile&u={alex}&sid={{sid}}", admin=True,
+               selector="form#viewprofile")
+    drew_post = board.sql("SELECT post_id FROM phpbb_posts WHERE poster_id = ? ORDER BY post_time DESC LIMIT 1",
+                          (drew,))[0][0]
+    drew_topic = board.sql("SELECT topic_id FROM phpbb_posts WHERE post_id = ?", (drew_post,))[0][0]
+    shoot.shot("seenotes-post-button", f"viewtopic.php?t={drew_topic}&sid={{sid}}", admin=True,
+               selector=f"#p{drew_post}")
+    shoot.shot("seenotes-mcp-notes", mcp.format(user=alex), admin=True, selector="#page-body")
+    shoot.shot("seenotes-mcp-post", f"mcp.php?i=main&mode=post_details&p={post}&sid={{sid}}", admin=True,
+               selector="#page-body")
+    shoot.shot("seenotes-acp-reasons", acp.format(mode="reasons"), admin=True, full_page=True)
+    shoot.shot("seenotes-acp-settings", acp.format(mode="settings"), admin=True, full_page=True)
+    shoot.shot("seenotes-acp-users", f"adm/index.php?i=users&mode=seenotes&u={alex}&sid={{sid}}", admin=True,
+               full_page=True)
+
+
+def shots_prunenotifications(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/prunenotifications: the ACP page, the Prune now confirmation and the finished prune.
+
+    Needs seed-forum's fixtures: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. Three members are made dormant (last
+    visits two to five years ago) and get 1,840 unread notifications between
+    them; the admin keeps 12. prunenotifications-acp shows the counts and the
+    settings, prunenotifications-acp-confirm the confirmation, and
+    prunenotifications-acp-done the message after all batches ran and the
+    table was optimized.
+    """
+    if not args.seed:
+        raise RuntimeError("run with --seed and seed-forum's bin/seed-standard-fixtures.php")
+    members = [r[0] for r in board.sql("SELECT user_id FROM phpbb_users WHERE user_type IN (0, 1) "
+                                       "AND user_id <> 2 ORDER BY user_id")][:3]
+    if len(members) < 3:
+        raise RuntimeError("the seeded board needs at least three members besides the admin")
+    year = 365 * 86400
+    now = int(time.time())
+    for user_id, (years, count) in zip(members, ((2.2, 1200), (3.5, 480), (5, 160))):
+        board.sql("UPDATE phpbb_users SET user_lastvisit = ?, user_regdate = ? WHERE user_id = ?",
+                  (now - int(years * year), now - int((years + 1) * year), user_id))
+        board.php("for ($i = 0; $i < %d; $i++) { $db->sql_query('INSERT INTO ' . NOTIFICATIONS_TABLE . ' '"
+                  " . $db->sql_build_array('INSERT', ['notification_type_id' => 1, 'item_id' => $i + 1,"
+                  " 'item_parent_id' => 0, 'user_id' => %d, 'notification_read' => 0,"
+                  " 'notification_time' => %d, 'notification_data' => ''])); }"
+                  % (count, user_id, now - int(years * year)), check=True)
+    board.php("for ($i = 0; $i < 12; $i++) { $db->sql_query('INSERT INTO ' . NOTIFICATIONS_TABLE . ' '"
+              " . $db->sql_build_array('INSERT', ['notification_type_id' => 1, 'item_id' => $i + 1,"
+              " 'item_parent_id' => 0, 'user_id' => 2, 'notification_read' => 0, 'notification_time' => %d,"
+              " 'notification_data' => ''])); }" % now, check=True)
+    set_config(board, {"prunenotifications_days": "730", "prunenotifications_batch": "500",
+                       "prunenotifications_cron_enable": "1", "prunenotifications_auto_optimize": "1"})
+    acp = "adm/index.php?i=-phpbbmodders-prunenotifications-acp-main_module&mode=settings&sid={sid}"
+    shoot.shot("prunenotifications-acp", acp, admin=True, full_page=True)
+
+    def open_confirm(p) -> None:
+        p.wait_for_timeout(1200)  # phpBB's minimum time before a form may be submitted
+        p.click("#prunenotifications_prune")
+        p.locator("form#confirm").wait_for()
+    shoot.shot("prunenotifications-acp-confirm", acp, admin=True, full_page=True, prepare=open_confirm)
+
+    def run_prune(p) -> None:
+        open_confirm(p)
+        p.click("form#confirm input[name=confirm]")
+        # The batches follow each other by meta refresh; wait for the final message
+        p.get_by_text("The notifications table was optimized").wait_for(timeout=120000)
+    shoot.shot("prunenotifications-acp-done", acp, admin=True, full_page=True, prepare=run_prune)
+
+
 SHOTS = {
+    "phpbbmodders/prunenotifications": shots_prunenotifications,
+    "phpbbmodders/seenotes": shots_seenotes,
+    "phpbbmodders/adduser": shots_adduser,
+    "phpbbmodders/autodbbackup": shots_autodbbackup,
     "phpbbmodders/contactadmin": shots_contactadmin,
+    "phpbbmodders/elonw": shots_elonw,
+    "phpbbmodders/genders": shots_genders,
     "phpbbmodders/copylinks": shots_copylinks,
     "phpbbmodders/documentation": shots_documentation,
     "phpbbmodders/feedlinks": shots_feedlinks,
