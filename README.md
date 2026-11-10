@@ -11,6 +11,7 @@ Build phpBB package ZIPs, publish GitHub Releases, wait for PR checks, and test 
 | [`git-release-langpack.sh`](git-release-langpack.sh) | Validate, package, and release language packs |
 | [`pr-wait.py`](pr-wait.py) | Wait for a pull request's checks |
 | [`normalize-composer.py`](normalize-composer.py) | Bring an extension's `composer.json` to the phpBB 3.3.19 / PHP 8.3.36 baseline |
+| [`prune-merged-branches.py`](prune-merged-branches.py) | Delete local branches already merged on GitHub, squash merges included |
 | [`phpbb-test-board/`](phpbb-test-board/) | Set up a local board, run checks, and take screenshots |
 
 ## Quick start
