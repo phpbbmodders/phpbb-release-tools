@@ -711,8 +711,40 @@ def enable_stopforumspam(board: Board) -> None:
     board.php("$phpbb_container->get('phpbbmodders.stopforumspam.core.sfsgroups')->build_adminsmods_cache();", check=True)
 
 
+def shots_stopforumspam_disapprove(board: Board, shoot: Shooter) -> None:
+    """The 'Report the poster to Stop Forum Spam' option on the MCP disapprove form.
+
+    Puts one reply into the moderation queue, opens its details in the MCP,
+    presses Disapprove and captures the reason form with the new checkbox.
+    The checkbox needs the mcp_approve_reason_after template event, added in
+    phpBB 3.3.20-RC1; on an older board the shot is skipped with a note.
+    """
+    template = board.root / "styles/prosilver/template/mcp_approve.html"
+    if "mcp_approve_reason_after" not in template.read_text(encoding="utf-8"):
+        print("  [skip] stopforumspam-disapprove-report: this phpBB has no mcp_approve_reason_after event "
+              "(added in 3.3.20-RC1)")
+        return
+    _, topic = busiest_forum_and_topic(board)
+    rows = board.sql("SELECT post_id FROM phpbb_posts WHERE topic_id = ? AND post_id <> "
+                     "(SELECT topic_first_post_id FROM phpbb_topics WHERE topic_id = ?) "
+                     "ORDER BY post_id DESC LIMIT 1", (topic, topic))
+    post = rows[0][0]
+    board.sql("UPDATE phpbb_posts SET post_visibility = 0 WHERE post_id = ?", (post,))
+    board.sql("UPDATE phpbb_topics SET topic_posts_approved = topic_posts_approved - 1, "
+              "topic_posts_unapproved = topic_posts_unapproved + 1 WHERE topic_id = ?", (topic,))
+    board.purge_cache()
+
+    def open_disapprove_form(p) -> None:
+        p.locator("input[name='action[disapprove]']").first.click()
+        p.wait_for_selector("#sfs_report_disapproved")
+        p.add_style_tag(content="#sfs_report_disapproved { outline: 3px solid #d31141; outline-offset: 2px; }")
+    shoot.shot("stopforumspam-disapprove-report", f"mcp.php?i=queue&mode=approve_details&p={post}&sid={{sid}}",
+               admin=True, selector="form#confirm", prepare=open_disapprove_form)
+
+
 def shots_stopforumspam(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
-    """phpbbmodders/stopforumspam: its ACP settings and the report button on posts. Use --seed."""
+    """phpbbmodders/stopforumspam: its ACP settings, the report button on posts, and reporting a poster
+    when disapproving their post. Use --seed."""
     enable_stopforumspam(board)
     shoot.shot("stopforumspam-acp-settings",
                "adm/index.php?i=-phpbbmodders-stopforumspam-acp-stopforumspam_module&mode=settings&sid={sid}",
@@ -722,6 +754,31 @@ def shots_stopforumspam(board: Board, shoot: Shooter, args: argparse.Namespace) 
         p.add_style_tag(content="li[id^='sfs'] .button { outline: 3px solid #d31141; outline-offset: 2px; }")
     shoot.shot("stopforumspam-report-button", f"viewtopic.php?t={topic}&sid={{sid}}", admin=True,
                selector=".post:has(li[id^='sfs'])", prepare=highlight_button)
+    shots_stopforumspam_disapprove(board, shoot)
+
+
+def shots_banhammer(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/banhammer: its ACP settings with the ban list switch, and the ban list page.
+
+    Turns the ban list on and bans two seeded members by username with
+    phpBB's own user_ban(), so the page has rows. Use --seed.
+    """
+    board.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'bh_banlist_enable'")
+    # Ordinary members only: not in any group that holds a moderator role (the seeded Staff group).
+    members = [r[0] for r in board.sql("SELECT u.username FROM phpbb_users u WHERE u.user_type = 0 "
+                                       "AND u.user_id NOT IN (SELECT ug.user_id FROM phpbb_user_group ug "
+                                       "JOIN phpbb_acl_groups ag ON ag.group_id = ug.group_id "
+                                       "JOIN phpbb_acl_roles r ON r.role_id = ag.auth_role_id "
+                                       "WHERE r.role_type = 'm_') "
+                                       "ORDER BY u.user_id DESC LIMIT 2")]
+    for name, length, reason in zip(members, (0, 60 * 24 * 30), ("Spam links in signatures", "Repeated flaming")):
+        board.php("user_ban('user', [" + php_string(name) + "], " + str(length) + ", '', false, "
+                  "'Staff-only note', " + php_string(reason) + ");", check=True)
+    board.purge_cache()
+    shoot.shot("banhammer-acp-settings",
+               "adm/index.php?i=-phpbbmodders-banhammer-acp-banhammer_module&mode=settings&sid={sid}",
+               admin=True, full_page=True)
+    shoot.shot("banhammer-banlist", "app.php/banlist?sid={sid}", admin=True)
 
 
 def shots_sfscompanion(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
@@ -1379,6 +1436,7 @@ SHOTS = {
     "phpbbmodders/printallposts": shots_printallposts,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
+    "phpbbmodders/banhammer": shots_banhammer,
     "phpbbmodders/topicclaim": shots_topicclaim,
     "phpbbmodders/wiki": shots_wiki,
     "ProMinoDeux": shots_prominodeux,
