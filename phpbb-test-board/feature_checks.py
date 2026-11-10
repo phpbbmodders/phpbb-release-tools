@@ -107,12 +107,20 @@ def check_bannerrotator(b: Board) -> None:
 
 
 def check_groupwarn(b: Board) -> None:
+    """phpbbmodders/groupwarn: warnings are refused, and the warn button and profile link hidden, until all
+    of a user's groups are ticked; founders can always warn; pending group memberships don't count."""
     mod_pw = secrets.token_urlsafe(12)
     mod_id = b.add_user("gwmod", mod_pw)
     target_id = b.add_user("gwtarget", secrets.token_urlsafe(12))
     b.php(f"group_user_add(4, [{mod_id}]);")  # Global moderators
+    # Give the target a post, so the warn button on posts can be checked.
+    post_id, topic_id = b.sql("SELECT post_id, topic_id FROM phpbb_posts ORDER BY post_id LIMIT 1")[0]
+    b.sql("UPDATE phpbb_posts SET poster_id = ? WHERE post_id = ?", (target_id, post_id))
+    b.purge_cache()
     s = requests.Session()
     b.login(s, "gwmod", mod_pw)
+    admin = requests.Session()
+    b.login(admin)
     url = f"{b.base}/mcp.php?i=warn&mode=warn_user&u={target_id}"
 
     def submit_warning() -> str:
@@ -123,15 +131,41 @@ def check_groupwarn(b: Board) -> None:
     def warnings() -> int:
         return b.sql("SELECT user_warnings FROM phpbb_users WHERE user_id = ?", (target_id,))[0][0]
 
+    def warn_button(session: requests.Session) -> bool:
+        return f"mode=warn_post&amp;p={post_id}" in session.get(f"{b.base}/viewtopic.php?t={topic_id}").text
+
+    def profile_link(session: requests.Session) -> bool:
+        page = session.get(f"{b.base}/memberlist.php?mode=viewprofile&u={target_id}").text
+        return f"mode=warn_user&amp;u={target_id}" in page
+
+    def set_warn(group_ids: list, value: int) -> None:
+        b.sql(f"UPDATE phpbb_groups SET group_warn = ? WHERE group_id IN ({','.join('?' * len(group_ids))})",
+              (value, *group_ids))
+        b.purge_cache()
+
+    ok(not warn_button(s) and not profile_link(s),
+       "warn button on posts and warn link on the profile hidden while the user's groups aren't ticked")
     body = submit_warning()
     ok("You cannot warn this user" in body and warnings() == 0,
        "moderator can't warn a user whose groups aren't ticked (default)")
+    ok(warn_button(admin), "the founder still gets the warn button")
+
     groups = [r[0] for r in b.sql("SELECT group_id FROM phpbb_user_group WHERE user_id = ?", (target_id,))]
-    b.sql(f"UPDATE phpbb_groups SET group_warn = 1 WHERE group_id IN ({','.join('?' * len(groups))})", tuple(groups))
-    b.purge_cache()
+    set_warn(groups, 1)
+    ok(warn_button(s) and profile_link(s), "warn button and profile link shown once all the user's groups are ticked")
     body = submit_warning()
     ok("You cannot warn this user" not in body and warnings() == 1,
        "moderator can warn once all the user's groups are ticked")
+
+    # A pending membership of an unticked group doesn't count; a full one does.
+    b.php("group_create($gid, GROUP_OPEN, 'GW pending', '', []);")
+    gid = b.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'GW pending'")[0][0]
+    b.php(f"group_user_add({gid}, [{target_id}], false, false, false, 0, 1);")
+    b.purge_cache()
+    ok(warn_button(s), "a pending membership of an unticked group doesn't block warnings")
+    b.sql("UPDATE phpbb_user_group SET user_pending = 0 WHERE group_id = ? AND user_id = ?", (gid, target_id))
+    b.purge_cache()
+    ok(not warn_button(s), "a full membership of an unticked group blocks warnings")
 
 
 def check_wiki(b: Board) -> None:

@@ -166,6 +166,11 @@ for name in "${names[@]}"; do
 	done
 done
 
+# The compiled container in cache/production is PHP for the PHP version that
+# built it (for example the host's 8.4); an older PHP can't even parse it, so
+# start from an empty cache. phpBB rebuilds it on the first request.
+find "$board_root/cache/production" -mindepth 1 -delete 2>/dev/null || true
+
 docker run --rm --network none --user "$(id -u):$(id -g)" \
 	-e DISABLE_AFTER="$disable_after" \
 	-e BOARD_ROOT="$board_root" -v "$board_root:$board_root" "${mounts[@]}" \
