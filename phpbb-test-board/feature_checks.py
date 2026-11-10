@@ -114,7 +114,8 @@ def check_groupwarn(b: Board) -> None:
     target_id = b.add_user("gwtarget", secrets.token_urlsafe(12))
     b.php(f"group_user_add(4, [{mod_id}]);")  # Global moderators
     # Give the target a post, so the warn button on posts can be checked.
-    post_id, topic_id = b.sql("SELECT post_id, topic_id FROM phpbb_posts ORDER BY post_id LIMIT 1")[0]
+    post_id, topic_id = b.sql("SELECT post_id, topic_id FROM phpbb_posts "
+                               "WHERE post_id = (SELECT MIN(post_id) FROM phpbb_posts)")[0]
     b.sql("UPDATE phpbb_posts SET poster_id = ? WHERE post_id = ?", (target_id, post_id))
     b.purge_cache()
     s = requests.Session()
@@ -129,7 +130,8 @@ def check_groupwarn(b: Board) -> None:
                          {**fields, "warning": "probe warning", "action[add_warning]": "Submit"})
 
     def warnings() -> int:
-        return b.sql("SELECT user_warnings FROM phpbb_users WHERE user_id = ?", (target_id,))[0][0]
+        # int(): MySQL, MariaDB and PostgreSQL boards return numbers as strings here.
+        return int(b.sql("SELECT user_warnings FROM phpbb_users WHERE user_id = ?", (target_id,))[0][0])
 
     def warn_button(session: requests.Session) -> bool:
         return f"mode=warn_post&amp;p={post_id}" in session.get(f"{b.base}/viewtopic.php?t={topic_id}").text
