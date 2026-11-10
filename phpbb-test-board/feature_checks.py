@@ -1127,7 +1127,10 @@ def check_elonw(b: Board) -> None:
             route.fulfill(status=200, content_type="text/html", body="<p>stub</p>")
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = playwright.chromium.launch(args=[
+            "--host-resolver-rules=MAP forum.tutorbrasil.com.br 127.0.0.1",
+            "--no-proxy-server",
+        ])
         try:
             context = browser.new_context()
             context.route("**/*", external_stub)
@@ -1164,6 +1167,7 @@ def check_elonw(b: Board) -> None:
             page.wait_for_load_state()
             ok(len(context.pages) == 1 and page.url.startswith(internal),
                "a link to the board itself opens in the same window")
+            check_elonw_public_suffix(b, browser)
         finally:
             browser.close()
 
@@ -1189,6 +1193,58 @@ def check_elonw(b: Board) -> None:
         ok(saved and str(saved[0][0]) == stored, f"the UCP stores {value} as {stored}")
         if value == "0":
             ok("elonw.js" not in admin.get(topic_url, timeout=20).text, "turning it off removes the script")
+
+
+def check_elonw_public_suffix(b: Board, browser) -> None:
+    """Classify same-suffix sites using the board's assets and exercise delegated clicks."""
+    base = f"http://forum.tutorbrasil.com.br:{b.port}/"
+    external = "https://noic.com.br/probe"
+    internal = "https://www.tutorbrasil.com.br/probe"
+    fixture = f"""<div class="content" id="elonw-probe">
+        <a id="elonw-external" href="{external}">External link</a>
+        <a id="elonw-internal" href="{internal}">Internal link</a>
+        <a id="elonw-forum" class="forum_link" href="{external}">External forum link</a>
+        </div>"""
+
+    def local_only(route) -> None:
+        """Serve board assets normally and answer other origins without network access."""
+        if route.request.url.startswith(base):
+            route.continue_()
+        else:
+            route.fulfill(status=200, content_type="text/html", body="<p>stub</p>")
+
+    context = browser.new_context()
+    try:
+        context.route("**/*", local_only)
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.add_init_script(f"""
+            window.elonwProbeOpens = [];
+            window.open = (url) => window.elonwProbeOpens.push(url);
+            document.addEventListener('DOMContentLoaded', () => {{
+                document.body.insertAdjacentHTML('beforeend', {json.dumps(fixture)});
+                document.querySelector('#elonw-probe').addEventListener('click', (event) => event.preventDefault());
+            }});
+        """)
+        response = page.goto(base + "index.php", wait_until="load", timeout=30000)
+        ok(response and response.ok, "board index loads on the public-suffix fixture host")
+        page.locator("#elonw-probe").wait_for()
+        page.wait_for_function("() => window.jQuery && window.jQuery.isReady")
+        # Run after the extension's jQuery-ready callback has classified the fixture.
+        page.evaluate("() => new Promise(resolve => window.jQuery(() => resolve()))")
+        ok(page.locator("#elonw-external.elonw").count() == 1, "unrelated .com.br link is marked external")
+        ok(page.locator("#elonw-internal.elonw").count() == 0, "same-site subdomain is unmarked")
+        page.locator("#elonw-external").click()
+        page.locator("#elonw-internal").click()
+        ok(page.evaluate("window.elonwProbeOpens") == [external],
+           "only the unrelated .com.br site opens a new window")
+        page.locator("#elonw-forum").click()
+        ok(page.evaluate("window.elonwProbeOpens") == [external, external],
+           "an unrelated .com.br forum link opens a new window")
+        ok(not errors, "no public-suffix fixture JavaScript errors" + (f": {errors[0]}" if errors else ""))
+    finally:
+        context.close()
 
 
 def check_seenotes(b: Board) -> None:
