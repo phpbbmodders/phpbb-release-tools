@@ -11,7 +11,7 @@ They build a board on SQLite and run an extension on it with PHP error logging o
 - `git`, `php` (with the `sqlite3` extension), `composer`, `curl`, `jq` and `openssl`
 - Python 3 with `venv`
 - ImageMagick's `convert`, for the reassignthumbs feature check
-- Docker, for `php-lint.sh`
+- Docker, for `php-lint.sh` and `enable-on-php.sh`
 
 The Python scripts create their own virtualenv (`.venv` in this folder) on first run and install `requirements.txt` into it; nothing needs installing or activating by hand. `screenshots.py` also downloads Playwright's Chromium on its first run.
 
@@ -68,6 +68,16 @@ phpbb-test-board/php-lint.sh path/to/extension [-p 7.4,8.4] [--strict]
 Runs `php -l` on every PHP file under each PHP version (default 7.4 and 8.4), in a throwaway container from the official `php:VERSION-cli` image, so an extension can be checked against its minimum PHP without that PHP installed. The folder is mounted read-only, the container has no network and is removed afterwards; `vendor/`, `node_modules/` and `.git/` are skipped. Compile-time deprecation notices, such as implicitly nullable parameters on PHP 8.4, are shown, and fail the run only with `--strict`. It needs no board.
 
 Exit status: 0 when every file passes on every version, 1 when a file fails or Docker fails, 2 for bad arguments. The first run of a version pulls its image.
+
+### `enable-on-php.sh`: enable on another PHP version
+
+```bash
+phpbb-test-board/enable-on-php.sh [-p 8.1] [--disable] BOARD_ROOT path/to/extension...
+```
+
+Enables each extension on a SQLite board built with [seed-forum](https://github.com/phpbbmodders/seed-forum) (`database: sqlite`, no extensions), running phpBB's `extension:enable` in a throwaway `php:VERSION-cli` container. That command calls `is_enableable()` and then runs the migrations, so it shows whether an extension installs on that PHP, or the refusal message when it should not (for example one version below its minimum). The board is mounted read-write at its own path, because `config.php` names the database by its absolute path; each extension is mounted read-only under `ext/` from its `composer.json` name, so nothing is copied into the board. Extensions that fail are retried once after the others, for ones that need another extension. `--disable` disables and purges them again afterwards.
+
+Exit status: 0 when every extension enabled, 1 when one failed or Docker fails, 2 for bad arguments. Needs Docker and `jq`.
 
 ### `run-epv.sh`: EPV the way CI fails on it
 
