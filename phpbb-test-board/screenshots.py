@@ -781,6 +781,20 @@ def shots_banhammer(board: Board, shoot: Shooter, args: argparse.Namespace) -> N
     shoot.shot("banhammer-banlist", "app.php/banlist?sid={sid}", admin=True)
 
 
+def shots_groupwarn(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/groupwarn: the Group warn setting on the Registered users group's ACP page."""
+    group_id = board.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'REGISTERED'")[0][0]
+    board.sql("UPDATE phpbb_groups SET group_warn = 1 WHERE group_id = ?", (group_id,))
+    board.purge_cache()
+
+    def highlight(p) -> None:
+        p.add_style_tag(content="#group_warn { outline: 3px solid #d31141; outline-offset: 2px; }")
+        p.locator("#group_warn").scroll_into_view_if_needed()
+    shoot.shot("groupwarn-acp-group-setting",
+               f"adm/index.php?i=acp_groups&mode=manage&action=edit&g={group_id}&sid={{sid}}", admin=True,
+               selector="fieldset:has(#group_warn)", prepare=highlight)
+
+
 def shots_sfscompanion(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/sfscompanion: its ACP logs and settings, and the profile link.
 
@@ -1437,6 +1451,7 @@ SHOTS = {
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
     "phpbbmodders/banhammer": shots_banhammer,
+    "phpbbmodders/groupwarn": shots_groupwarn,
     "phpbbmodders/topicclaim": shots_topicclaim,
     "phpbbmodders/wiki": shots_wiki,
     "ProMinoDeux": shots_prominodeux,
