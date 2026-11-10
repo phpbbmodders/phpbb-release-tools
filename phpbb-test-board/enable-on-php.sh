@@ -145,15 +145,26 @@ fi
 [ "${#pending[@]}" -eq 0 ]
 EOF
 
-# Mount points for the extensions are created inside the read-write board
-# mount; remove the empty folders Docker leaves behind afterwards.
+# Create each mount point as the calling user before Docker starts. Docker
+# creates missing mount points as root, and root-owned folders in ext/ could
+# then not be removed without root. Only folders made here are removed
+# afterwards, deepest first; existing vendor folders are left alone.
+created=()
 cleanup() {
-	for name in "${names[@]}"; do
-		rmdir "$board_root/ext/$name" 2>/dev/null || true
-		rmdir "$board_root/ext/${name%%/*}" 2>/dev/null || true
+	local i
+	for (( i=${#created[@]}-1; i>=0; i-- )); do
+		rmdir "${created[i]}" 2>/dev/null || true
 	done
 }
 trap cleanup EXIT
+for name in "${names[@]}"; do
+	for path in "$board_root/ext/${name%%/*}" "$board_root/ext/$name"; do
+		if [ ! -e "$path" ]; then
+			mkdir "$path" || { echo "Error: cannot create $path" >&2; exit 1; }
+			created+=("$path")
+		fi
+	done
+done
 
 docker run --rm --network none --user "$(id -u):$(id -g)" \
 	-e DISABLE_AFTER="$disable_after" \
