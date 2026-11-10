@@ -976,6 +976,10 @@ def check_autodbbackup(b: Board) -> None:
     saved = {k: config(f"auto_db_backup_{k}") for k in ("enable", "gc", "gc_unit", "copies", "optimize")}
     ok(saved == {"enable": "1", "gc": "7200", "gc_unit": "hours", "copies": "2", "optimize": optimize},
        f"settings stored: {saved}")
+    chosen_start = int(b.php(f"echo mktime({when['hours']}, {when['minutes']}, 0, "
+                             f"{when['mon']}, {when['mday']}, {when['year']});", check=True))
+    ok(int(config("auto_db_backup_last_gc")) + 7200 == chosen_start,
+       "ACP saves the exact chosen backup start on the board's clock")
 
     # A backup due in January must be selectable in December: next year is offered
     page = admin.get(page_url, timeout=20)
@@ -1000,10 +1004,23 @@ def check_autodbbackup(b: Board) -> None:
 
     task = "phpbbmodders.autodbbackup.cron.task.auto_db_backup"
     for run in range(3):
-        b.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'auto_db_backup_last_gc'")
+        # Start several intervals late, away from a boundary, to detect cadence drift.
+        anchor = int(b.php("echo time() - 3 * 7200 - 600;", check=True)) if run == 0 else 0
+        b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'auto_db_backup_last_gc'",
+              (str(anchor),))
         b.purge_cache()
+        if run == 0:
+            ready = b.php(f"$task = $phpbb_container->get('cron.manager')->find_task('{task}');"
+                          "echo json_encode($task && $task->is_ready());", check=True)
+            ok(json.loads(ready), "an overdue hourly backup is ready to run")
         out = b.cli("cron:run", task)
         ok("rror" not in out, f"cron run {run + 1} finished" + ("" if "rror" not in out else f": {out[-200:]}"))
+        if run == 0:
+            state = json.loads(b.php(
+                f"$task = $phpbb_container->get('cron.manager')->find_task('{task}');"
+                "echo json_encode([(int) $config['auto_db_backup_last_gc'], $task && $task->is_ready()]);",
+                check=True))
+            ok(state == [anchor + 3 * 7200, False], "a late hourly backup preserves its cadence and is no longer due")
         time.sleep(1.1)  # a new second, so each backup's timestamp differs
     auto = [f for f in backups() if marker in f]
     ok(len(auto) == 2, f"retention keeps the newest 2 automatic backups ({len(auto)} left)")
@@ -1081,6 +1098,11 @@ def check_autodbbackup_directory(b: Board, admin: requests.Session, page_url: st
         run_cron(3)
         ok(len(custom_files(directory)) == 2, f"backups go to the custom directory, newest 2 kept "
                                               f"({len(custom_files(directory))} there)")
+        private = json.loads(b.php(
+            f"$files = glob('{directory}/backup_*{marker}*.sql'); $private = count($files) > 0;"
+            "foreach ($files as $file) { $private = $private && filesize($file) > 0 "
+            "&& (fileperms($file) & 0777) === 0600; } echo json_encode($private);", check=True))
+        ok(private, "custom backup archives are nonempty and have private 0600 permissions")
         ok(backups() == before, "no backup is left in phpBB's own backup location")
         # Opened to other users: refused at run time, logged, nothing written
         b.php(f"chmod('{directory}', 0777);", check=True)
