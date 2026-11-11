@@ -15,6 +15,8 @@ Exit status: 0 if every check passed, 1 if any failed, 2 for bad arguments.
 """
 import argparse
 import hashlib
+import html
+import io
 import json
 import re
 import secrets
@@ -22,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 from typing import Callable
 
@@ -1632,7 +1635,136 @@ def check_prunenotifications(b: Board) -> None:
         b.purge_cache()
 
 
+TH_EXT = "thcheck/demo"
+TH_LANG_HEAD = ("<?php\nif (!defined('IN_PHPBB'))\n{\n\texit;\n}\n\nif (empty($lang) || !is_array($lang))\n{\n"
+                "\t$lang = [];\n}\n\n$lang = array_merge($lang, [\n")
+
+
+def php_str(text: str) -> str:
+    """A PHP single-quoted string literal, so nothing in the text is interpolated."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def th_fixture_php(version: str, entries: str) -> str:
+    """PHP that (re)creates the thcheck/demo fixture extension at a version, deleting the old folder first
+    the way an administrator replaces an extension, and adds a test "sv" language when the board lacks one."""
+    composer = json.dumps({"name": TH_EXT, "type": "phpbb-extension", "version": version,
+                           "license": "GPL-2.0-only", "authors": [{"name": "feature check"}],
+                           "require": {"php": ">=7.2"},
+                           "extra": {"display-name": "Translation Check Fixture",
+                                     "soft-require": {"phpbb/phpbb": ">=3.3.0"}}})
+    lang_file = TH_LANG_HEAD + entries + "]);\n"
+    ext_php = "<?php\nnamespace thcheck\\demo;\n\nclass ext extends \\phpbb\\extension\\base\n{\n}\n"
+    return (
+        "$dir = 'ext/thcheck/demo';"
+        "if (is_dir($dir)) { $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);"
+        " foreach ($it as $f) { $f->isDir() ? rmdir($f) : unlink($f); } rmdir($dir); }"
+        "mkdir($dir . '/language/en', 0777, true);"
+        f"file_put_contents($dir . '/composer.json', {php_str(composer)});"
+        f"file_put_contents($dir . '/ext.php', {php_str(ext_php)});"
+        f"file_put_contents($dir . '/language/en/common.php', {php_str(lang_file)});"
+        "chmod($dir . '/language', 0777);"
+        "if (!is_dir('language/sv')) { $src = 'language/en/'; mkdir('language/sv', 0777);"
+        " $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);"
+        " foreach ($it as $f) { $t = 'language/sv/' . substr($f->getPathname(), strlen($src)); $f->isDir() ? mkdir($t, 0777, true) : copy($f, $t); }"
+        " file_put_contents('language/sv/iso.txt', \"Swedish\\nSvenska (test copy)\\nfeature check\\n\"); }"
+        "$r = $db->sql_query(\"SELECT lang_id FROM \" . LANG_TABLE . \" WHERE lang_iso = 'sv'\");"
+        "if (!$db->sql_fetchfield('lang_id')) { $db->sql_query('INSERT INTO ' . LANG_TABLE . ' ' . $db->sql_build_array('INSERT',"
+        " ['lang_iso' => 'sv', 'lang_dir' => 'sv', 'lang_english_name' => 'Swedish', 'lang_local_name' => 'Svenska (test copy)', 'lang_author' => 'feature check'])); }"
+        "echo 'fixture ok';"
+    )
+
+
+def check_translationhelper(b: Board) -> None:
+    """phpbbmodders/translationhelper: translate a fixture extension in the ACP (tricky text stays text), then
+    replace the extension's folder with a new version as an upgrade does: the saved translation is put back
+    from store/, a notice says so, and the string whose English changed shows its old and new English."""
+    out = b.php(th_fixture_php("1.0.0", "\t'TH_WELCOME' => 'Welcome, %s!',\n\t'TH_RULES' => 'Read the <b>rules</b>.',\n"
+                                        "\t'TH_POSTS' => [1 => '%d post', 2 => '%d posts'],\n"))
+    ok("fixture ok" in out, "the fixture extension and test language are set up")
+    b.purge_cache()
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    acp = f"{b.base}/adm/index.php?i=-phpbbmodders-translationhelper-acp-main_module&mode=extensions&lang=sv&sid={sid}"
+
+    overview = admin.get(acp, timeout=30).text
+    ok("Translation Check Fixture" in overview, "the extensions page lists the fixture extension")
+
+    page_url = f"{acp}&action=edit&ext={TH_EXT}&file=common.php"
+    page = admin.get(page_url, timeout=30).text
+    action, fields = form_fields(page, "translationhelper_edit")
+    keys = {name: html.unescape(value) for name, value in fields.items() if name.startswith("key[")}
+    ok(len(keys) == 4, f"the editor shows the four untranslated strings ({len(keys)})")
+    texts = {
+        '["TH_WELCOME"]': "Välkommen, %s!",
+        '["TH_RULES"]': "Läs <b>reglerna</b>. It's \\ <?php echo 'x'; ?>",
+        '["TH_POSTS",1]': "%d inlägg",
+        '["TH_POSTS",2]': "%d inlägg",
+    }
+    data = {name: value for name, value in fields.items() if not name.startswith("key[")}
+    for name, path_key in keys.items():
+        data[name] = path_key
+        data["text" + name[3:]] = texts.get(path_key, "")
+    data["save"] = "Save translation"
+    body = post_back(admin, f"{b.base}/adm", page_url, action, data)
+    ok("saved and written to the board" in body, "saving writes the translation to the board")
+
+    read = ("$lang = []; include 'ext/thcheck/demo/language/sv/common.php'; echo json_encode($lang);")
+    written = b.php(read).strip().splitlines()
+    lang = json.loads(written[-1]) if written else {}
+    ok(lang.get("TH_RULES") == texts['["TH_RULES"]'] and lang.get("TH_POSTS", {}).get("2") == "%d inlägg",
+       "the written language file gives back exactly what was typed")
+    saved = b.php("echo is_file('store/phpbbmodders_translationhelper/translations/thcheck/demo/sv.json') ? 'yes' : 'no';")
+    ok(saved.strip().endswith("yes"), "a copy of the translation is saved in store/")
+
+    # Older English versions: a release ZIP, then loose language files, in the one upload field
+    versions_url = f"{acp}&action=versions&ext={TH_EXT}"
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as archive:
+        archive.writestr("demo-0.9.0/composer.json", json.dumps({"name": TH_EXT, "type": "phpbb-extension"}))
+        archive.writestr("demo-0.9.0/language/en/common.php", TH_LANG_HEAD + "\t'TH_WELCOME' => 'Hello, %s!',\n]);\n")
+    for label, files in (
+        ("0.9.0", [("english_files[]", ("demo-0.9.0.zip", zip_buffer.getvalue(), "application/zip"))]),
+        ("0.8.0", [("english_files[]", ("common.php", TH_LANG_HEAD + "\t'TH_WELCOME' => 'Hi, %s!',\n]);\n", "text/plain")),
+                   ("english_files[]", ("info.php", TH_LANG_HEAD + "\t'TH_INFO' => 'Info',\n]);\n", "text/plain"))]),
+    ):
+        action, fields = form_fields(admin.get(versions_url, timeout=30).text, "translationhelper_upload")
+        time.sleep(1.1)
+        body = admin.post(f"{b.base}/adm/" + action.lstrip("./"), data={**fields, "version": label, "upload": "Upload"},
+                          files=files, timeout=30).text
+        added = b.sql("SELECT COUNT(*) FROM phpbb_translationhelper_snapshots s JOIN phpbb_translationhelper_strings t "
+                      "ON t.snapshot_id = s.snapshot_id WHERE s.ext_name = ? AND s.ext_version = ? "
+                      "AND s.snapshot_source = 'upload'", (TH_EXT, label))
+        expected = 1 if label == "0.9.0" else 2
+        ok("were added" in body and added and int(added[0][0]) == expected,
+           f"uploading {'a release ZIP' if label == '0.9.0' else 'two language files'} adds version {label}")
+
+    # Upgrade: the folder is replaced by 1.1.0, which changes one English string and has no Swedish files
+    b.php(th_fixture_php("1.1.0", "\t'TH_WELCOME' => 'Welcome back, %s!',\n\t'TH_RULES' => 'Read the <b>rules</b>.',\n"
+                                  "\t'TH_POSTS' => [1 => '%d post', 2 => '%d posts'],\n\t'TH_NEW' => 'New string',\n"))
+    gone = b.php("echo is_file('ext/thcheck/demo/language/sv/common.php') ? 'there' : 'gone';")
+    ok(gone.strip().endswith("gone"), "the upgrade removed the Swedish file")
+    overview = admin.get(acp, timeout=30).text
+    ok("translation put back for Translation Check Fixture" in overview, "the extensions page says it was put back")
+    restored = b.php(read).strip().splitlines()
+    lang = json.loads(restored[-1]) if restored else {}
+    ok(lang.get("TH_WELCOME") == "Välkommen, %s!" and lang.get("TH_NEW") == "New string",
+       "the translation is back, with English for the new string")
+    page = admin.get(page_url, timeout=30).text
+    ok("English changed" in page and "Welcome, %s!" in page and "Welcome back, %s!" in page,
+       "the changed string shows its old and new English")
+    ok("&lt;b&gt;rules&lt;/b&gt;" in admin.get(page_url + "&filter=all", timeout=30).text,
+       "English text is shown escaped, not as HTML")
+
+    # The fixture extension and its saved translation are files, which a database reset does not undo
+    b.php("foreach (['ext/thcheck', 'store/phpbbmodders_translationhelper/translations/thcheck'] as $dir) {"
+          "if (!is_dir($dir)) { continue; }"
+          "$it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);"
+          "foreach ($it as $f) { $f->isDir() ? rmdir($f) : unlink($f); } rmdir($dir); }")
+
+
 CHECKS = {
+    "phpbbmodders/translationhelper": check_translationhelper,
     "phpbbmodders/prunenotifications": check_prunenotifications,
     "phpbbmodders/feedlinks": check_feedlinks,
     "phpbbmodders/topicclaim": check_topicclaim,
