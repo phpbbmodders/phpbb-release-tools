@@ -1341,6 +1341,64 @@ def shots_autodbbackup(board: Board, shoot: Shooter, args: argparse.Namespace) -
         shoot.shot("autodbbackup-update-directory-error", acp, admin=True, full_page=True, prepare=public_directory)
 
 
+def shots_translationhelper(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/translationhelper: the extensions page right after an extension upgrade (with
+    the "put back" notice), the editor showing a string whose English changed, the older English
+    versions page, and the settings.
+
+    Needs seed-forum's fixtures: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. seed-forum's bin/seed-translationhelper-fixtures.php,
+    next to it, adds a test Swedish language and the seedforum/translatable 1.0.0
+    fixture extension; a translation is then saved through the extension, and
+    bin/translationhelper-upgrade-fixture.php replaces the fixture with 1.1.0 the way an
+    upgrade does.
+    """
+    if not args.seed:
+        raise RuntimeError("run with --seed and seed-forum's bin/seed-standard-fixtures.php")
+    seed_bin = Path(args.seed).resolve().parent
+    try:
+        _translationhelper_shots(board, shoot, seed_bin)
+    finally:
+        # The fixtures are files, which the board's database reset does not undo
+        for leftover in ("ext/seedforum", "language/sv", "store/phpbbmodders_translationhelper"):
+            shutil.rmtree(board.root / leftover, ignore_errors=True)
+
+
+def _translationhelper_shots(board: Board, shoot: Shooter, seed_bin: Path) -> None:
+    """The work of shots_translationhelper(), whose caller removes the fixture files afterwards."""
+    for script in ("seed-translationhelper-fixtures.php",):
+        done = subprocess.run(["php", "-d", "opcache.enable_cli=0", str(seed_bin / script), str(board.root)],
+                              capture_output=True, text=True)
+        if done.returncode != 0:
+            raise RuntimeError(f"{script} failed: {(done.stderr or done.stdout).strip()[-300:]}")
+    board.purge_cache()
+    texts = {
+        '["TRANSLATABLE_QUOTE"]': "Det är en citerad text",
+        '["TRANSLATABLE_HTML"]': "Läs <strong>reglerna</strong> först.",
+        '["TRANSLATABLE_POSTS",1]': "%d inlägg",
+        '["TRANSLATABLE_POSTS",2]': "%d inlägg",
+    }
+    saved = board.php("$m = $phpbb_container->get('phpbbmodders.translationhelper.manager');"
+                      "$m->take_snapshots(true);"
+                      f"$p = $m->save_file('seedforum/translatable', 'sv', 'common.php', json_decode({json.dumps(json.dumps(texts))}, true), [], 2);"
+                      "echo $p ? 'problems' : 'saved';", check=True)
+    if "saved" not in saved:
+        raise RuntimeError(f"saving the fixture translation failed: {saved.strip()[-300:]}")
+    upgraded = subprocess.run(["php", str(seed_bin / "translationhelper-upgrade-fixture.php"), str(board.root)],
+                              capture_output=True, text=True)
+    if upgraded.returncode != 0:
+        raise RuntimeError(f"upgrade fixture failed: {(upgraded.stderr or upgraded.stdout).strip()[-300:]}")
+
+    acp = "adm/index.php?i=-phpbbmodders-translationhelper-acp-main_module&mode={mode}&sid={{sid}}"
+    ext = acp.format(mode="extensions") + "&lang=sv"
+    shoot.shot("translationhelper-extensions", ext, admin=True, full_page=True)
+    shoot.shot("translationhelper-editor", ext + "&action=edit&ext=seedforum%2Ftranslatable&file=common.php",
+               admin=True, full_page=True)
+    shoot.shot("translationhelper-versions", ext + "&action=versions&ext=seedforum%2Ftranslatable",
+               admin=True, full_page=True)
+    shoot.shot("translationhelper-settings", acp.format(mode="settings"), admin=True, full_page=True)
+
+
 def shots_seenotes(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/seenotes: the reason line next to a post and on a profile, the notes button
     next to a post by a member without a reason, the MCP post notice, MCP → Moderator notes, and
@@ -1434,6 +1492,7 @@ def shots_prunenotifications(board: Board, shoot: Shooter, args: argparse.Namesp
 
 
 SHOTS = {
+    "phpbbmodders/translationhelper": shots_translationhelper,
     "phpbbmodders/prunenotifications": shots_prunenotifications,
     "phpbbmodders/seenotes": shots_seenotes,
     "phpbbmodders/adduser": shots_adduser,
