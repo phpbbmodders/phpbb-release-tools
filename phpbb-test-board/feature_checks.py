@@ -170,6 +170,72 @@ def check_groupwarn(b: Board) -> None:
     ok(not warn_button(s), "a full membership of an unticked group blocks warnings")
 
 
+def check_feedlinks(b: Board) -> None:
+    """phpbbmodders/feedlinks: per-forum Atom/RSS links on the board index and the forum page, a valid RSS
+    feed, and no links for forums set to none."""
+    b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name IN ('feed_enable', 'feed_forum')")
+    forums = [int(r[0]) for r in b.sql("SELECT forum_id FROM phpbb_forums WHERE forum_type = 1 ORDER BY left_id")]
+    shown, hidden = forums[0], forums[1] if len(forums) > 1 else None
+    b.sql("UPDATE phpbb_forums SET forum_feedlinks = 3 WHERE forum_id = ?", (shown,))
+    if hidden is not None:
+        b.sql("UPDATE phpbb_forums SET forum_feedlinks = 0 WHERE forum_id = ?", (hidden,))
+    b.purge_cache()
+    guest = requests.Session()
+
+    def links_to(page: str, path: str) -> bool:
+        """Whether page links to path (guests get ?sid=... appended to links)."""
+        return re.search(re.escape(path) + r'["?&]', page) is not None
+
+    index = guest.get(f"{b.base}/index.php").text
+    rss_path = b.route(f"rss/forum/{shown}")
+    template = b.root / "styles/prosilver/template/forumlist_body.html"
+    via = ("through the forumlist_body_forum_desc_after event"
+           if "forumlist_body_forum_desc_after" in template.read_text(encoding="utf-8") else "appended to the description")
+    ok(links_to(index, rss_path) and links_to(index, f"feed/forum/{shown}") and "feedlinks-list" in index,
+       f"board index shows Atom and RSS links for a forum set to both ({via})")
+    if hidden is not None:
+        ok(not links_to(index, b.route(f"rss/forum/{hidden}")), "no links for a forum set to none")
+    ok(links_to(guest.get(f"{b.base}/viewforum.php?f={shown}").text, rss_path), "the forum page shows its RSS link")
+    feed = guest.get(f"{b.base}/{rss_path}")
+    ok(feed.status_code == 200 and "<rss" in feed.text and "<channel>" in feed.text,
+       "the forum's RSS feed is served as RSS 2.0")
+    b.sql("UPDATE phpbb_forums SET forum_feedlinks = 0 WHERE forum_id = ?", (shown,))
+    b.purge_cache()
+    ok(not links_to(guest.get(f"{b.base}/index.php").text, rss_path), "links go away when the forum is set to none")
+
+
+def check_topicclaim(b: Board) -> None:
+    """phpbbmodders/topicclaim: a moderator claims a topic with a note, other members see nothing, and the
+    claim can be released (after confirmation)."""
+    mod_pw = secrets.token_urlsafe(12)
+    mod_id = b.add_user("tcmod", mod_pw)
+    b.add_user("tcmember", secrets.token_urlsafe(12))
+    b.php(f"group_user_add(4, [{mod_id}]);")  # Global moderators, whose role includes m_topicclaim
+    b.purge_cache()
+    topic_id = int(b.sql("SELECT topic_id FROM phpbb_topics WHERE topic_id = (SELECT MIN(topic_id) FROM phpbb_topics)")[0][0])
+    mod = requests.Session()
+    b.login(mod, "tcmod", mod_pw)
+    page_url = f"{b.base}/{b.route(f'topicclaim/{topic_id}')}"
+
+    def claims() -> list:
+        return b.sql("SELECT user_id, claim_note FROM phpbb_topicclaim_claims WHERE topic_id = ?", (topic_id,))
+
+    action, fields = form_fields(mod.get(page_url).text, "topicclaim")
+    post_back(mod, b.base, page_url, action, {**fields, "topicclaim_note": "probe note", "topicclaim_action": "claim"})
+    rows = claims()
+    ok(len(rows) == 1 and int(rows[0][0]) == mod_id and rows[0][1] == "probe note",
+       "a moderator claims a topic with a note")
+    ok("topicclaim-notice" in mod.get(f"{b.base}/viewtopic.php?t={topic_id}").text,
+       "the topic page shows the claim to moderators")
+    ok("topicclaim-notice" not in requests.get(f"{b.base}/viewtopic.php?t={topic_id}").text,
+       "guests don't see the claim")
+    action, fields = form_fields(mod.get(page_url).text, "topicclaim")
+    confirm = post_back(mod, b.base, page_url, action, {**fields, "topicclaim_action": "release"})
+    action, fields = form_fields(confirm, "confirm")
+    post_back(mod, b.base, page_url, action, {**fields, "confirm": "Yes"})
+    ok(claims() == [], "the claim is released after confirming")
+
+
 def check_wiki(b: Board) -> None:
     # Articles and a post stored through phpBB's own text parser, so the
     # extension's [[ ]] markup is parsed exactly as on a real board.
@@ -1568,6 +1634,8 @@ def check_prunenotifications(b: Board) -> None:
 
 CHECKS = {
     "phpbbmodders/prunenotifications": check_prunenotifications,
+    "phpbbmodders/feedlinks": check_feedlinks,
+    "phpbbmodders/topicclaim": check_topicclaim,
     "phpbbmodders/seenotes": check_seenotes,
     "phpbbmodders/autodbbackup": check_autodbbackup,
     "phpbbmodders/elonw": check_elonw,
