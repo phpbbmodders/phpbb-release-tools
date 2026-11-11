@@ -1756,9 +1756,11 @@ def check_translationhelper(b: Board) -> None:
     ok("&lt;b&gt;rules&lt;/b&gt;" in admin.get(page_url + "&filter=all", timeout=30).text,
        "English text is shown escaped, not as HTML")
 
-    b.php("$dir = 'ext/thcheck';"
+    # The fixture extension and its saved translation are files, which a database reset does not undo
+    b.php("foreach (['ext/thcheck', 'store/phpbbmodders_translationhelper/translations/thcheck'] as $dir) {"
+          "if (!is_dir($dir)) { continue; }"
           "$it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);"
-          "foreach ($it as $f) { $f->isDir() ? rmdir($f) : unlink($f); } rmdir($dir);")
+          "foreach ($it as $f) { $f->isDir() ? rmdir($f) : unlink($f); } rmdir($dir); }")
 
 
 CHECKS = {
