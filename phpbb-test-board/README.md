@@ -199,6 +199,16 @@ phpbb-test-board/rename_upgrade.py path/to/stopforumspam@0af40a1 path/to/stopfor
   --setting sfs_api_key=UPGRADE-TEST
 ```
 
+### `acp_extension.py`: enable or disable through the ACP
+
+```bash
+phpbb-test-board/acp_extension.py enable|disable vendor/name [--url http://localhost:8161]
+```
+
+Does what an administrator does on **Customise > Manage extensions**, on a board that is already being served (a seed-forum board's nginx site, for example): logs in, re-authenticates for the ACP, confirms Enable or Disable, then follows each "in progress" refresh phpBB sends while it runs the extension's steps and migrations in time-limited chunks, until phpBB reports success or an error. It prints one line per request and a summary with the number of requests and the time taken.
+
+Use it for an extension that cannot be enabled from phpBB's command line (kinerity/knowledgebase reads the current user's name in a migration), and to time the web path of a long migration. It logs in as seed-forum's public fixture admin unless you pass `--user` and put the password in `PHPBB_ADMIN_PASSWORD`. The session id goes in every URL, because Python's cookie jar does not send cookies set for a bare `localhost` back.
+
 ### `template_a11y.py`: labels on icon-only links and buttons
 
 ```bash

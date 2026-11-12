@@ -91,6 +91,17 @@ check "page_a11y.py with a page lacking LABEL= exits 2" exits_with 2 "$tools/pag
 check "page_a11y.py with a missing seed-forum board exits 1" \
   exits_with 1 "$tools/page_a11y.py" -s "$tmp/no-board" "Index=index.php"
 
+# acp_extension.py: arguments are checked before any board is contacted
+check "acp_extension.py --help exits 0" exits_with 0 "$tools/acp_extension.py" --help
+check "acp_extension.py --help describes --url" output_has "--url" "$tools/acp_extension.py" --help
+check "acp_extension.py without arguments exits 2" exits_with 2 "$tools/acp_extension.py"
+check "acp_extension.py with an unknown action exits 2" exits_with 2 "$tools/acp_extension.py" purge vendor/name
+check "acp_extension.py with a bad extension name exits 2" exits_with 2 "$tools/acp_extension.py" enable not-an-extension
+check "acp_extension.py --user without PHPBB_ADMIN_PASSWORD exits 2" \
+  exits_with 2 env -u PHPBB_ADMIN_PASSWORD "$tools/acp_extension.py" enable vendor/name --user someone
+check "acp_extension.py with no board at --url exits 1" \
+  exits_with 1 "$tools/acp_extension.py" enable vendor/name --url http://127.0.0.1:9
+
 # rename_upgrade.py: arguments are checked before any board is touched
 renamed="$tmp/renamed-ext"
 git init -q "$renamed"
