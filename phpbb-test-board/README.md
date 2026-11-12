@@ -152,7 +152,7 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/genders` gives every member a gender and saves the UCP selector, a topic, a profile and the ACP settings with the defaults, then the same topic, profile and settings with gender text before the icon, the phpBB 3.0 MOD prosilver icon set and gender in the main profile details. Use `--seed` with seed-forum's standard fixtures.
 
-`phpbbmodders/knowledgebase` makes its own categories, articles (live, waiting for review, with a revision, and a draft) and forum questions, so a board search for `backup` shows its block; `--seed` with seed-forum's standard fixtures adds members to write them. Its two ACP pages are taken in full, so a new setting is not cut off.
+`phpbbmodders/knowledgebase` makes its own categories, articles (live, waiting for review, with a revision, and a draft) and forum questions, so a board search for `backup` shows its block; `--seed` with seed-forum's standard fixtures adds members to write them. Its two ACP pages are taken in full, so a new setting is not cut off. The last shot switches on the introduction above the index, with the default text the extension stores on install, and switches it off again.
 
 `phpbbmodders/newspage` replaces the board's welcome topic with four example news topics, the last one opening with a picture the script draws (and deletes afterwards), and makes that forum the news forum. It saves the news page with the first image above the text and without poster information or post buttons, one news item as the admin, the ACP settings (in full), the news page on a phone and filtered by forum, then the news page with poster information and post buttons on, shortened to 120 characters, and without the filters.
 

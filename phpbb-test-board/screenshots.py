@@ -658,7 +658,8 @@ KB_QUESTIONS = [
 
 
 def shots_knowledgebase(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
-    """phpbbmodders/knowledgebase: articles, the approval queue, search, the ACP and the recent changes page.
+    """phpbbmodders/knowledgebase: articles, the approval queue, search, the ACP, the recent changes page and the
+    index introduction.
 
     Makes its own categories, articles and forum questions, so --seed is only needed for
     more forum content. The ACP pages are taken in full, so a new setting is not cut off.
@@ -687,6 +688,13 @@ def shots_knowledgebase(board: Board, shoot: Shooter, args: argparse.Namespace) 
     shoot.shot("10-advanced-search-option", "search.php?sid={sid}", admin=True, selector=".panel:has(#kb_also)")
     shoot.shot("11-acp-search-settings", acp.format("search", "index"), admin=True, full_page=True)
     shoot.shot("12-recent-changes", f"{kb}/recent_changes?sid={{sid}}", admin=True)
+
+    # The introduction above the index is off until switched on; its text is the default one stored on install.
+    board.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'kb_intro_enabled'")
+    board.purge_cache()
+    shoot.shot("13-index-introduction", f"{kb}?sid={{sid}}", admin=True)
+    board.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'kb_intro_enabled'")
+    board.purge_cache()
 
     # The category tree is the one page that needs hierarchical browsing switched on.
     board.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'kb_hierarchical_index'")
