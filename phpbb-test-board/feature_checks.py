@@ -253,8 +253,12 @@ def check_knowledgebase(b: Board) -> None:
     b.login(reader, "kbreader" + suffix, reader_pw)
     title, word = "Check article " + secrets.token_hex(3), "kbcheck" + secrets.token_hex(4)
     page_url = f"{b.base}/{b.route('knowledgebase/posting')}?id={cat_id}"
+    # Required custom fields (seed-forum's fixtures have some) get their first enabled value
+    required = {f"field_values[{field_id}][]": str(value_id) for field_id, value_id in b.sql(
+        "SELECT f.field_id, MIN(v.value_id) FROM phpbb_kb_fields f JOIN phpbb_kb_field_values v "
+        "ON v.field_id = f.field_id WHERE f.field_required = 1 AND v.enabled = 1 GROUP BY f.field_id")}
     action, fields = form_fields(author.get(page_url, timeout=20).text, "postform")
-    post_back(author, b.base, page_url, action, {**fields, "subject": title, "descr": "A check",
+    post_back(author, b.base, page_url, action, {**fields, **required, "subject": title, "descr": "A check",
               "message": f"Body with the word {word}.", "submit": "Submit"})
     article = b.sql("SELECT article_id, approved FROM phpbb_kb_articles WHERE article_title = ?", (title,))
     ok(article and int(article[0][1]) == 0, "a member submits an article, which waits for approval")
