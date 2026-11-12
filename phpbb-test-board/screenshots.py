@@ -693,6 +693,8 @@ def shots_knowledgebase(board: Board, shoot: Shooter, args: argparse.Namespace) 
     board.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'kb_intro_enabled'")
     board.purge_cache()
     shoot.shot("17-index-introduction", f"{kb}?sid={{sid}}", admin=True)
+    shoot.shot("18-acp-introduction", acp.format("config", "settings"), admin=True,
+               selector="fieldset:has(#intro_enabled)")
     board.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'kb_intro_enabled'")
     board.purge_cache()
 
