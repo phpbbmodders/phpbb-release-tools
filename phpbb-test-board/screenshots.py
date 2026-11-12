@@ -692,7 +692,7 @@ def shots_knowledgebase(board: Board, shoot: Shooter, args: argparse.Namespace) 
     # The introduction above the index is off until switched on; its text is the default one stored on install.
     board.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'kb_intro_enabled'")
     board.purge_cache()
-    shoot.shot("13-index-introduction", f"{kb}?sid={{sid}}", admin=True)
+    shoot.shot("17-index-introduction", f"{kb}?sid={{sid}}", admin=True)
     board.sql("UPDATE phpbb_config SET config_value = '0' WHERE config_name = 'kb_intro_enabled'")
     board.purge_cache()
 
