@@ -207,6 +207,85 @@ def check_feedlinks(b: Board) -> None:
     ok(not links_to(guest.get(f"{b.base}/index.php").text, rss_path), "links go away when the forum is set to none")
 
 
+def check_knowledgebase(b: Board) -> None:
+    """phpbbmodders/knowledgebase: the ACP adds a category (a forged form or move link is refused), a member
+    submits an article that stays hidden until a moderator approves it, then readers see and find it."""
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    manage = f"{b.base}/adm/index.php?i=-phpbbmodders-knowledgebase-acp-manage_module&mode=manage&sid={sid}"
+    name = "KB check " + secrets.token_hex(3)
+
+    def category() -> list:
+        return b.sql("SELECT category_id FROM phpbb_kb_categories WHERE category_name = ?", (name,))
+
+    page_url = f"{manage}&action=add&parent_id=0"
+    action, fields = form_fields(admin.get(page_url, timeout=20).text)
+    forged = {k: v for k, v in fields.items() if k not in ("form_token", "creation_time")}
+    body = post_back(admin, f"{b.base}/adm", page_url, action, {**forged, "category_name": name, "update": "Submit"})
+    ok("The submitted form was invalid" in body and not category(), "the ACP refuses a category form without its token")
+    post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "category_name": name, "update": "Submit"})
+    rows = category()
+    ok(rows, "the ACP adds a category")
+    if not rows:
+        return
+    cat_id = int(rows[0][0])
+    body = admin.get(f"{manage}&action=move_up&f={cat_id}", timeout=20).text
+    ok("The submitted form was invalid" in body, "a category move link without its hash is refused")
+
+    # Members may view the Knowledge Base and add articles to this category
+    author_pw, reader_pw = secrets.token_urlsafe(12), secrets.token_urlsafe(12)
+    suffix = secrets.token_hex(2)
+    b.add_user("kbauthor" + suffix, author_pw)
+    b.add_user("kbreader" + suffix, reader_pw)
+    registered = int(b.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'REGISTERED'")[0][0])
+    view = int(b.sql("SELECT auth_option_id FROM phpbb_acl_options WHERE auth_option = 'u_kb_view'")[0][0])
+    add = int(b.sql("SELECT auth_option_id FROM phpbb_kb_options WHERE auth_option = 'kb_u_add'")[0][0])
+    b.sql("DELETE FROM phpbb_acl_groups WHERE group_id = ? AND auth_option_id = ?", (registered, view))
+    b.sql("INSERT INTO phpbb_acl_groups (group_id, forum_id, auth_option_id, auth_role_id, auth_setting) "
+          "VALUES (?, 0, ?, 0, 1)", (registered, view))
+    b.sql("INSERT INTO phpbb_kb_groups (group_id, category_id, auth_option_id, auth_setting) VALUES (?, ?, ?, 1)",
+          (registered, cat_id, add))
+    b.sql("UPDATE phpbb_users SET user_permissions = ''")
+    b.purge_cache()
+
+    author, reader = requests.Session(), requests.Session()
+    b.login(author, "kbauthor" + suffix, author_pw)
+    b.login(reader, "kbreader" + suffix, reader_pw)
+    title, word = "Check article " + secrets.token_hex(3), "kbcheck" + secrets.token_hex(4)
+    page_url = f"{b.base}/{b.route('knowledgebase/posting')}?id={cat_id}"
+    action, fields = form_fields(author.get(page_url, timeout=20).text, "postform")
+    post_back(author, b.base, page_url, action, {**fields, "subject": title, "descr": "A check",
+              "message": f"Body with the word {word}.", "submit": "Submit"})
+    article = b.sql("SELECT article_id, approved FROM phpbb_kb_articles WHERE article_title = ?", (title,))
+    ok(article and int(article[0][1]) == 0, "a member submits an article, which waits for approval")
+    if not article:
+        return
+    art_id = int(article[0][0])
+    article_url = f"{b.base}/{b.route('knowledgebase/article')}?k={art_id}"
+    approve_url = f"{b.base}/{b.route('knowledgebase/approve')}?id={art_id}"
+    ok(title not in reader.get(article_url, timeout=20).text, "other members cannot read it before approval")
+    ok("You are not authorised" in reader.get(approve_url, timeout=20).text,
+       "other members cannot open its approve page")
+
+    # An article is assigned to a KB team and marked reviewed before it can be approved; a board
+    # without a team gets the Administrators group as one
+    teams = b.sql("SELECT config_value FROM phpbb_config_text WHERE config_name = 'kb_team_groups'")
+    team_ids = json.loads(teams[0][0]) if teams and teams[0][0] else []
+    if not team_ids:
+        team_ids = [int(b.sql("SELECT group_id FROM phpbb_groups WHERE group_name = 'ADMINISTRATORS'")[0][0])]
+        b.php("$phpbb_container->get('config_text')->set('kb_team_groups', " + json.dumps(json.dumps(team_ids)) + ");")
+        b.purge_cache()
+    for step in ({"action": "assign", "team_id": str(team_ids[0])}, {"action": "review"},
+                 {"action": "approve", "skip_message": "1"}):
+        action, fields = form_fields(admin.get(approve_url, timeout=20).text)
+        post_back(admin, b.base, approve_url, action, {**fields, **step})
+    ok(int(b.sql("SELECT approved FROM phpbb_kb_articles WHERE article_id = ?", (art_id,))[0][0]) == 1,
+       "a moderator assigns it to a team, marks it reviewed and approves it")
+    ok(title in reader.get(article_url, timeout=20).text, "members can read it once approved")
+    search = reader.get(f"{b.base}/{b.route('knowledgebase/search')}?keywords={word}&sf=all&cid=0", timeout=20).text
+    ok(title in search, "the Knowledge Base search finds it")
+
+
 def check_topicclaim(b: Board) -> None:
     """phpbbmodders/topicclaim: a moderator claims a topic with a note, other members see nothing, and the
     claim can be released (after confirmation)."""
@@ -1764,6 +1843,7 @@ def check_translationhelper(b: Board) -> None:
 
 
 CHECKS = {
+    "phpbbmodders/knowledgebase": check_knowledgebase,
     "phpbbmodders/translationhelper": check_translationhelper,
     "phpbbmodders/prunenotifications": check_prunenotifications,
     "phpbbmodders/feedlinks": check_feedlinks,
