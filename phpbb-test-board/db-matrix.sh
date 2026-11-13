@@ -25,6 +25,7 @@ WORK_DIR="$HOME/.cache/phpbb-release-tools/db-matrix"
 SEED_FORUM="$(cd "$SCRIPT_DIR/../.." && pwd)/seed-forum"
 BASE_PORT=8130
 KEEP=0
+PHPBB_PULL_REQUEST=""
 
 usage() {
 	cat <<'EOF'
@@ -38,6 +39,9 @@ Options:
   -w, --work-dir DIR      where boards and their configs go (default: ~/.cache/phpbb-release-tools/db-matrix)
   -s, --seed-forum DIR    seed-forum checkout (default: seed-forum next to this repository)
   -p, --base-port PORT    first port for the boards; each board gets the next one (default: 8130)
+  -P, --phpbb-pull-request N
+                          build the master boards from open phpbb/phpbb pull request N
+                          (seed-forum board.phpbb_pull_request); their names get -prN
   -k, --keep              leave the extensions mounted and the database containers running after the checks
   -h, --help              show this help and exit
 
@@ -59,6 +63,7 @@ while [ $# -gt 0 ]; do
 		-w|--work-dir) WORK_DIR="${2:?}"; shift 2 ;;
 		-s|--seed-forum) SEED_FORUM="${2:?}"; shift 2 ;;
 		-p|--base-port) BASE_PORT="${2:?}"; shift 2 ;;
+		-P|--phpbb-pull-request) PHPBB_PULL_REQUEST="${2:?}"; shift 2 ;;
 		-k|--keep) KEEP=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		-*) die "unknown option $1 (see --help)" ;;
@@ -70,6 +75,7 @@ if [ ${#EXTENSIONS[@]} -eq 0 ]; then
 	exit 0
 fi
 [[ "$BASE_PORT" =~ ^[0-9]+$ ]] || die "--base-port must be a number"
+[ -z "$PHPBB_PULL_REQUEST" ] || [[ "$PHPBB_PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || die "--phpbb-pull-request must be a pull request number"
 [ -f "$SEED_FORUM/bin/db-container.py" ] || die "$SEED_FORUM has no board.database support (bin/db-container.py)"
 for ext in "${EXTENSIONS[@]}"; do
 	[ -f "$ext/composer.json" ] || die "$ext has no composer.json"
@@ -87,6 +93,9 @@ write_config() {
 		echo "board:"
 		echo "  root: '$root'"
 		echo "  phpbb_branch: '$branch'"
+		if [ "$branch" = master ] && [ -n "$PHPBB_PULL_REQUEST" ]; then
+			echo "  phpbb_pull_request: $PHPBB_PULL_REQUEST"
+		fi
 		echo "  database: $database"
 		echo "  server_name: localhost"
 		echo "  server_port: '$port'"
@@ -107,6 +116,11 @@ port="$BASE_PORT"
 for branch in "${branch_list[@]}"; do
 	for database in "${database_list[@]}"; do
 		name="${branch//./}-$database"
+		# A pull-request board keeps its own folder, as seed-forum refuses to
+		# reuse a folder filled from another phpBB source.
+		if [ "$branch" = master ] && [ -n "$PHPBB_PULL_REQUEST" ]; then
+			name="${branch//./}-pr$PHPBB_PULL_REQUEST-$database"
+		fi
 		root="$WORK_DIR/boards/$name"
 		config="$WORK_DIR/$name.yml"
 		log="$WORK_DIR/$name.log"

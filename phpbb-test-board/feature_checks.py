@@ -207,6 +207,61 @@ def check_feedlinks(b: Board) -> None:
     ok(not links_to(guest.get(f"{b.base}/index.php").text, rss_path), "links go away when the forum is set to none")
 
 
+def check_restorejumpbox(b: Board) -> None:
+    """phpbbmodders/restorejumpbox: on a phpBB 4.0 build with the public jumpbox removed (phpbb/phpbb#6927,
+    seed-forum board.phpbb_pull_request), the "Jump to" selector is back on forum and topic pages, nested and
+    filtered by permissions, and the ACP setting hides it while keeping its links. On a phpBB that still has
+    its own jumpbox, the extension stays out of the way."""
+    def forum_id(name: str) -> int:
+        return int(b.sql("SELECT forum_id FROM phpbb_forums WHERE forum_name = ?", (name,))[0][0])
+
+    def jumpbox(page: str) -> str:
+        """The extension's selector markup, or "" when the page has none."""
+        m = re.search(r'(?s)<div class="action-bar actions-jump"[^>]*>.*?id="restorejumpbox-links".*?</ul>', page)
+        return m.group(0) if m else ""
+
+    discussion, staff = forum_id("General Discussion"), forum_id("Staff Room")
+    topic_id = int(b.sql("SELECT MIN(topic_id) FROM phpbb_topics WHERE forum_id = ?", (discussion,))[0][0])
+    guest = requests.Session()
+    forum_page = guest.get(f"{b.base}/viewforum.php?f={discussion}").text
+    if b.sql("SELECT config_value FROM phpbb_config WHERE config_name = 'load_jumpbox'"):
+        ok(not jumpbox(forum_page) and 'id="jumpbox"' in forum_page,
+           "on a phpBB that still has its own jumpbox, only core's selector is shown")
+        return
+
+    box = jumpbox(forum_page)
+    ok(box, "guests get the selector on a forum page")
+    ok(f"f={discussion}" in box and re.search(r'class="jumpbox-sub-link"[^>]*>(?:(?!</a>).)*Member Projects', box, re.S),
+       "it lists forums in order, with a subforum marked as nested")
+    ok(f"f={staff}" not in box, "a forum guests can't see is left out")
+    ok(re.search(r"restorejumpbox/[^\"]*jumpbox\.js", forum_page), "its keyboard script is loaded")
+    ok(jumpbox(guest.get(f"{b.base}/viewtopic.php?t={topic_id}").text), "the topic page has the selector")
+    ok(not jumpbox(guest.get(f"{b.base}/viewtopic.php?t={topic_id}&view=print").text),
+       "the printable topic view does not")
+    ok(not jumpbox(guest.get(f"{b.base}/index.php").text), "the board index does not")
+
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    ok(f"f={staff}" in jumpbox(admin.get(f"{b.base}/viewforum.php?f={discussion}").text),
+       "an administrator's selector includes the staff-only forum")
+    settings = admin.get(f"{b.base}/adm/index.php?i=acp_board&mode=load&sid={sid}").text
+    ok('name="config[restorejumpbox_visible]"' in settings, "ACP Load settings has the visibility setting")
+    action, fields = form_fields(settings, "acp_board")
+    # acp_board only saves the settings a form sends, so the others stay as they are.
+    data = {**fields, "config[restorejumpbox_visible]": "0", "submit": "Submit"}
+    post_back(admin, f"{b.base}/adm", f"{b.base}/adm/index.php?i=acp_board&mode=load&sid={sid}", action, data)
+    saved = b.sql("SELECT config_value FROM phpbb_config WHERE config_name = 'restorejumpbox_visible'")
+    ok(saved and str(saved[0][0]) == "0", "saving the setting as No stores it")
+    b.purge_cache()
+    hidden_page = guest.get(f"{b.base}/viewforum.php?f={discussion}").text
+    box = jumpbox(hidden_page)
+    ok(box and re.search(r'<div class="action-bar actions-jump"\s+hidden', box) and f"f={discussion}" in box,
+       "set to No, the selector is hidden but its forum links stay in the page")
+    ok(not re.search(r"restorejumpbox/[^\"]*jumpbox\.js", hidden_page), "and its script is not loaded")
+    b.sql("UPDATE phpbb_config SET config_value = '1' WHERE config_name = 'restorejumpbox_visible'")
+    b.purge_cache()
+
+
 def check_knowledgebase(b: Board) -> None:
     """phpbbmodders/knowledgebase: the ACP adds a category (a forged form or move link is refused), a member
     submits an article that stays hidden until a moderator approves it, then readers see and find it."""
@@ -1851,6 +1906,7 @@ CHECKS = {
     "phpbbmodders/translationhelper": check_translationhelper,
     "phpbbmodders/prunenotifications": check_prunenotifications,
     "phpbbmodders/feedlinks": check_feedlinks,
+    "phpbbmodders/restorejumpbox": check_restorejumpbox,
     "phpbbmodders/topicclaim": check_topicclaim,
     "phpbbmodders/seenotes": check_seenotes,
     "phpbbmodders/autodbbackup": check_autodbbackup,
