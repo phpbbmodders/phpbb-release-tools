@@ -128,6 +128,23 @@ check "feature_checks.py --seed-board without an installed board exits 1" \
 check "feature_checks.py --seed-board with --with exits 2" \
   exits_with 2 "$tools/feature_checks.py" "$tmp/repo" --seed-board "$tmp" --with "$tmp/repo"
 
+# screenshots.py --seed-board: arguments and a missing board only; no board is built here
+jumpbox="$tmp/jumpbox-ext"
+git init -q "$jumpbox"
+printf '{"name": "phpbbmodders/restorejumpbox", "type": "phpbb-extension"}\n' >"$jumpbox/composer.json"
+git -C "$jumpbox" add composer.json
+git -C "$jumpbox" -c user.name=test -c user.email=test@example.com commit -qm "test extension"
+check "screenshots.py --help describes --seed-board" \
+  output_has "--seed-board BOARD_ROOT" "$tools/screenshots.py" --help
+check "screenshots.py --help lists Restore Jumpbox" \
+  output_has "phpbbmodders/restorejumpbox" "$tools/screenshots.py" --help
+check "screenshots.py --seed-board with --with exits 2" \
+  exits_with 2 "$tools/screenshots.py" "$jumpbox" -o "$tmp/out" --seed-board "$tmp" --with "$renamed"
+check "screenshots.py --seed-board with --seed exits 2" \
+  exits_with 2 "$tools/screenshots.py" "$jumpbox" -o "$tmp/out" --seed-board "$tmp" --seed "$jumpbox/composer.json"
+check "screenshots.py --seed-board without an installed board exits 1" \
+  exits_with 1 "$tools/screenshots.py" "$jumpbox" -o "$tmp/out" --seed-board "$tmp/no-board"
+
 # db-matrix.sh: option handling only; no board or container is started
 check "db-matrix.sh without arguments shows help and exits 0" exits_with 0 "$tools/db-matrix.sh"
 check "db-matrix.sh --help shows usage" output_has "Usage: db-matrix.sh" "$tools/db-matrix.sh" --help

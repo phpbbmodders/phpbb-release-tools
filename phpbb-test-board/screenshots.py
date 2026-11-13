@@ -10,6 +10,12 @@ made every user's style and shown on board pages. The pages are listed in
 SHOTS below, keyed by an extension's composer name or a style's name from
 style.cfg; add an entry for a new project. Restores the board afterwards.
 
+With --seed-board the screenshots are taken on an installed seed-forum board
+instead, with the extension already enabled on it: a phpBB 4.0 board, or one
+built from an open phpbb/phpbb pull request (db-matrix.sh -P N -k builds and
+keeps one). That board is not reset; only its name is changed for the
+screenshots and put back afterwards.
+
 The first run installs Playwright's Chromium into the user's cache.
 
 Exit status: 0 if every screenshot was saved, 1 if any failed, 2 for bad arguments.
@@ -32,7 +38,7 @@ ensure_venv()
 import requests  # noqa: E402
 from playwright.sync_api import Browser, Error as PlaywrightError, sync_playwright  # noqa: E402
 
-from _board import Board, ext_name, is_style, parse_spec, required_packages, style_cfg  # noqa: E402
+from _board import Board, SeedBoard, ext_name, is_style, parse_spec, required_packages, style_cfg  # noqa: E402
 
 BOARD_NAME = "Example board"
 BOARD_DESCRIPTION = "A phpBB board"
@@ -1501,6 +1507,37 @@ def shots_prunenotifications(board: Board, shoot: Shooter, args: argparse.Namesp
     shoot.shot("prunenotifications-acp-done", acp, admin=True, full_page=True, prepare=run_prune)
 
 
+def shots_restorejumpbox(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/restorejumpbox: the "Jump to" selector open at the bottom of a forum page, a topic
+    page and a forum page on a phone, all as a guest, and its ACP Load settings fieldset.
+
+    The extension does nothing while core still has its own jumpbox, so it needs --seed-board with a
+    board built from phpbb/phpbb#6927 and seed-forum's bin/seed-standard-fixtures.php, for example the
+    one db-matrix.sh -b master -d sqlite -P 6927 -k keeps. General Discussion has the nested Member
+    Projects forum; the Staff Room is hidden from guests, so it is left out of their selector.
+    """
+    if not isinstance(board, SeedBoard) or board.sql("SELECT config_value FROM phpbb_config "
+                                                      "WHERE config_name = 'load_jumpbox'"):
+        raise RuntimeError("needs --seed-board with a phpBB built from phpbb/phpbb#6927 "
+                           "(db-matrix.sh -b master -d sqlite -P 6927 -k)")
+    forum = board.sql("SELECT forum_id FROM phpbb_forums WHERE forum_name = 'General Discussion'")[0][0]
+    topic = board.sql("SELECT topic_id FROM phpbb_topics WHERE forum_id = ? "
+                      "ORDER BY topic_posts_approved DESC, topic_id LIMIT 1", (int(forum),))[0][0]
+
+    def open_jumpbox(p) -> None:
+        button = p.locator("#jumpbox .dropdown-trigger")
+        button.scroll_into_view_if_needed()
+        p.mouse.wheel(0, 10000)  # to the bottom of the page, so the list has room to open upwards
+        button.click()
+        p.locator("#restorejumpbox-links").wait_for(state="visible")
+
+    shoot.shot("forum", f"viewforum.php?f={forum}", prepare=open_jumpbox)
+    shoot.shot("topic", f"viewtopic.php?t={topic}", prepare=open_jumpbox)
+    shoot.shot("mobile", f"viewforum.php?f={forum}", phone=True, prepare=open_jumpbox)
+    shoot.shot("acp-load-settings", "adm/index.php?i=acp_board&mode=load&sid={sid}", admin=True,
+               selector="fieldset:has(input[name='config[restorejumpbox_visible]'])")
+
+
 SHOTS = {
     "phpbbmodders/translationhelper": shots_translationhelper,
     "phpbbmodders/prunenotifications": shots_prunenotifications,
@@ -1517,6 +1554,7 @@ SHOTS = {
     "phpbbmodders/newspage": shots_newspage,
     "phpbbmodders/posteripinviewtopic": shots_posteripinviewtopic,
     "phpbbmodders/printallposts": shots_printallposts,
+    "phpbbmodders/restorejumpbox": shots_restorejumpbox,
     "phpbbmodders/sfscompanion": shots_sfscompanion,
     "phpbbmodders/stopforumspam": shots_stopforumspam,
     "phpbbmodders/banhammer": shots_banhammer,
@@ -1558,8 +1596,15 @@ def main() -> int:
                          "(extensions only)")
     ap.add_argument("-b", "--board-dir",
                     help="board directory created by setup-board.sh (default: $PHPBB_TEST_BOARD)")
+    ap.add_argument("-S", "--seed-board", metavar="BOARD_ROOT",
+                    help="installed seed-forum board to use instead of --board-dir, with the extension already "
+                         "enabled on it, for example a phpBB 4.0 or pull-request board kept by db-matrix.sh -k; "
+                         "it is not reset (extensions only; --seed and --with don't apply)")
+    ap.add_argument("--seed-forum", metavar="DIR", default=str(Path(__file__).resolve().parents[2] / "seed-forum"),
+                    help="seed-forum checkout used with --seed-board (default: seed-forum next to this repository)")
     ap.add_argument("-p", "--port", type=int, default=8083,
-                    help="port for the temporary web server (default: 8083)")
+                    help="port for the temporary web server (default: 8083); with --seed-board, the board's "
+                         "own server_port")
     args = ap.parse_args()
 
     try:
@@ -1574,12 +1619,20 @@ def main() -> int:
     style = is_style(repo, ref)
     if style and needed:
         ap.error("--with is for extensions; a style needs no other extensions")
+    if args.seed_board:
+        if style:
+            ap.error("--seed-board is for extensions; shoot a style on a setup-board.sh board")
+        if args.seed or needed:
+            ap.error("--seed and --with can't be combined with --seed-board; seed the board and enable "
+                     "required extensions with seed-forum")
     name = style_cfg(repo, ref)["name"] if style else ext_name(repo, ref)
     if name not in SHOTS:
         ap.error(f"no screenshots defined for {name}; add them to SHOTS in {Path(__file__).name}")
     out_dir = Path(args.out).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.seed_board:
+        return shoot_seed_board(args, name, repo, out_dir)
     board = Board(args.board_dir, args.port)
     if style:
         ext, target = board.install_style(repo, ref)
@@ -1604,29 +1657,58 @@ def main() -> int:
         board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'sitename'", (BOARD_NAME,))
         board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'site_desc'", (BOARD_DESCRIPTION,))
         board.purge_cache()
-        with board.serve(), sync_playwright() as playwright:
-            browser = ensure_chromium(playwright)
-            shooter = Shooter(board, browser, out_dir)
-            try:
-                SHOTS[ext](board, shooter, args)
-            finally:
-                browser.close()
-                for path in shooter.cleanup:
-                    if Path(path).is_dir():
-                        shutil.rmtree(path, ignore_errors=True)
-                    else:
-                        Path(path).unlink(missing_ok=True)
-        errors = board.php_errors()
-        if errors:
-            print(f"  [FAIL] PHP errors logged: {errors[0][:200]}")
-        print(f"== {len(shooter.saved)} saved, {len(shooter.failed)} failed")
-        return 1 if shooter.failed or errors else 0
+        return take_shots(board, ext, args, out_dir)
     finally:
         if style:
             board.remove_style(target)
         else:
             board.remove_ext(target)
 
+
+def shoot_seed_board(args: argparse.Namespace, ext: str, repo: Path, out_dir: Path) -> int:
+    """Take an extension's screenshots on an installed seed-forum board, where it is already enabled.
+
+    Nothing is installed or reset: only the board's name and description are
+    changed for the screenshots, then put back.
+    """
+    board = SeedBoard(args.seed_board, args.port, args.seed_forum)
+    print(f"== {ext} ({repo.name}, as mounted on the board) on phpBB {board.version} -> {out_dir}")
+    active = board.sql("SELECT ext_active FROM phpbb_ext WHERE ext_name = ?", (ext,))
+    if not active or str(active[0][0]) != "1":
+        print(f"  [FAIL] {ext} is not enabled on {board.root}; enable it with seed-forum")
+        return 1
+    names = dict(board.sql("SELECT config_name, config_value FROM phpbb_config "
+                           "WHERE config_name IN ('sitename', 'site_desc')"))
+    try:
+        board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'sitename'", (BOARD_NAME,))
+        board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'site_desc'", (BOARD_DESCRIPTION,))
+        board.purge_cache()
+        return take_shots(board, ext, args, out_dir)
+    finally:
+        for config_name, value in names.items():
+            board.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (value, config_name))
+        board.purge_cache()
+
+
+def take_shots(board: Board, ext: str, args: argparse.Namespace, out_dir: Path) -> int:
+    """Serve the board and run the project's SHOTS function; return the exit status."""
+    with board.serve(), sync_playwright() as playwright:
+        browser = ensure_chromium(playwright)
+        shooter = Shooter(board, browser, out_dir)
+        try:
+            SHOTS[ext](board, shooter, args)
+        finally:
+            browser.close()
+            for path in shooter.cleanup:
+                if Path(path).is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    Path(path).unlink(missing_ok=True)
+    errors = board.php_errors()
+    if errors:
+        print(f"  [FAIL] PHP errors logged: {errors[0][:200]}")
+    print(f"== {len(shooter.saved)} saved, {len(shooter.failed)} failed")
+    return 1 if shooter.failed or errors else 0
 
 if __name__ == "__main__":
     sys.exit(main())

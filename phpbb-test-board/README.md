@@ -145,6 +145,7 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 **Options:**
 - `--seed SCRIPT` runs a PHP script that fills the board with forums, topics and users first, as `php SCRIPT BOARD_ROOT`. Use it for styles and for any pages that need real content; a fresh board has one forum and one post. [seed-forum](https://github.com/phpbbmodders/seed-forum)'s `bin/seed-standard-fixtures.php` works well.
 - `--build DIR` is for phpbbmodders/documentation only: the phpbbdocs-hugo build to serve.
+- `--seed-board BOARD_ROOT` (`-S`) takes an extension's screenshots on an installed [seed-forum](https://github.com/phpbbmodders/seed-forum) board instead, with the extension already enabled on it. Use it for phpBB 4.0-only extensions, or for a board built from an open phpbb/phpbb pull request: `db-matrix.sh -k` builds such a board and keeps it, with the extension mounted. The board is not reset; only its name and description are changed for the screenshots and put back afterwards. Pass the board's own port with `--port`; `--seed` and `--with` don't apply, since seed-forum seeds the board and enables what it needs.
 
 `phpbbmodders/contactadmin` saves the three documentation gallery shots (ACP settings, guest form, member form) with private-message delivery and no captcha, plus three for its 10/18/2026 update gallery. The last of those sends a guest message through the form and shows the topic the contact bot posts.
 
@@ -171,6 +172,14 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 `phpbbmodders/printallposts` sets the board to two posts per page, so the busiest topic spans two pages, then saves the **Topic tools** menu open on it and the **Print all** page showing every post, both as a guest. Use `--seed` with seed-forum's standard fixtures.
 
 `phpbbmodders/posteripinviewtopic` gives the busiest topic's posts the IP address 8.8.8.8 (seeded posts come from 127.0.0.1, which the extension hides) and saves, as the admin, the address in a post's profile column and its lookup popup. The lookup is real: the board asks ip-api.com, so the run needs internet access. Use `--seed` with seed-forum's standard fixtures.
+
+`phpbbmodders/restorejumpbox` needs `--seed-board` with a board built from phpbb/phpbb#6927, since the extension does nothing while core still has its own jumpbox, and seed-forum's standard fixtures. It saves, as a guest, the **Jump to** list open at the bottom of General Discussion (with the nested Member Projects, and without the Staff Room guests can't see), on a topic page and on a phone, and the extension's fieldset in ACP → General → Load settings. The board `db-matrix.sh` keeps is on port 8130:
+
+```bash
+phpbb-test-board/db-matrix.sh -b master -d sqlite -P 6927 -k path/to/restorejumpbox
+phpbb-test-board/screenshots.py path/to/restorejumpbox -o path/to/restorejumpbox/docs/images/screenshots \
+  --seed-board ~/.cache/phpbb-release-tools/db-matrix/boards/master-pr6927-sqlite --port 8130
+```
 
 For example, ProMinoDeux's screenshots:
 
