@@ -124,6 +124,8 @@ phpbb-test-board/db-matrix.sh path/to/extension [-b 3.3,master] [-d sqlite,mysql
 
 For each phpBB branch and database, builds a seed-forum board with the extension enabled (bind-mounted from the checkout as it is on disk), runs `feature_checks.py --seed-board` against it, and stops that board's database container. It prints a line per board and a summary. Boards and logs go in `--work-dir` (default `~/.cache/phpbb-release-tools/db-matrix`) and are rebuilt on every run; ports start at `--base-port` (default 8130). Oracle isn't covered: phpBB is dropping it.
 
+To test against a phpBB core change that isn't merged yet, `-P N` (`--phpbb-pull-request`) builds the `master` boards from open phpbb/phpbb pull request N instead of the `master` branch, through seed-forum's `board.phpbb_pull_request`. Those boards get their own folders (`master-prN-<database>`). For example, phpbbmodders/restorejumpbox only does anything once phpbb/phpbb#6927 removes core's jumpbox: `db-matrix.sh -b master -P 6927 path/to/restorejumpbox`.
+
 The MSSQL container accepts Microsoft's SQL Server Developer licence; leave `mssql` out of `-d` if that hasn't been agreed. Needs Docker and a seed-forum checkout with `board.database` support.
 
 Exit status: 0 when every board passed, 1 when one failed, 2 for bad arguments.
