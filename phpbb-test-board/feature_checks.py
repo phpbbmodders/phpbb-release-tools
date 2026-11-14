@@ -2010,8 +2010,8 @@ def check_titaniatopictransfer(b: Board) -> None:
     status = b.sql("SELECT topic_status FROM phpbb_topics WHERE topic_id = ?", (second["topic"],))
     ok(status and int(status[0][0]) == 1, "the forum topic is locked")
     kept = b.sql("SELECT post_text FROM phpbb_posts WHERE topic_id = ? ORDER BY post_id", (second["topic"],))
-    ok(len(kept) == 4 and "Support belongs in the CDB" in kept[-1][0] and "/db/" in kept[-1][0],
-       "the original posts stay, with a closing reply giving the reason and the link")
+    ok(len(kept) == 4 and "Support belongs in the CDB" in kept[-1][0] and f"{b.base}/" in kept[-1][0] and "/db/" in kept[-1][0],
+       "the original posts stay, with a closing reply giving the reason and an absolute link")
     copied = b.sql("SELECT COUNT(*) FROM customisation_posts WHERE post_text LIKE ?", ("%Transfer check copy:%",))
     ok(copied and int(copied[0][0]) == 3, "all three posts are copied to Titania")
 
