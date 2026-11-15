@@ -1538,6 +1538,109 @@ def shots_restorejumpbox(board: Board, shoot: Shooter, args: argparse.Namespace)
                selector="fieldset:has(input[name='config[restorejumpbox_visible]'])")
 
 
+TTT_SHOTS_PHP = (
+    # Titania permissions for the admin, a category, an approved contribution with an author profile, and two
+    # topics of the standard fixtures that guests can read, with at least four approved posts each
+    "$r = $db->sql_query('SELECT auth_option_id FROM ' . ACL_OPTIONS_TABLE . \" WHERE auth_option \" . $db->sql_like_expression('u_titania' . $db->get_any_char()));"
+    "$rows = []; while ($o = $db->sql_fetchrow($r)) { $rows[] = ['user_id' => 2, 'forum_id' => 0, 'auth_option_id' => (int) $o['auth_option_id'], 'auth_role_id' => 0, 'auth_setting' => 1]; }"
+    "$db->sql_freeresult($r);"
+    "$db->sql_query('DELETE FROM ' . ACL_USERS_TABLE . ' WHERE user_id = 2 AND forum_id = 0 AND auth_role_id = 0');"
+    "$db->sql_multi_insert(ACL_USERS_TABLE, $rows); $auth->acl_clear_prefetch();"
+    "$r = $db->sql_query(\"SELECT contrib_id FROM customisation_contribs WHERE contrib_name_clean = 'topic-tools'\"); $contrib = (int) $db->sql_fetchfield('contrib_id'); $db->sql_freeresult($r);"
+    "if (!$contrib) {"
+    " $r = $db->sql_query('SELECT MAX(right_id) AS r FROM customisation_categories'); $right = (int) $db->sql_fetchfield('r'); $db->sql_freeresult($r);"
+    " $db->sql_query('INSERT INTO customisation_categories ' . $db->sql_build_array('INSERT', ['parent_id' => 0, 'left_id' => $right + 1, 'right_id' => $right + 2,"
+    "  'category_type' => 8, 'category_name' => 'Board Tools', 'category_name_clean' => 'board-tools', 'category_desc' => '', 'category_contribs' => 1]));"
+    " $category = (int) $db->sql_nextid();"
+    " $db->sql_query('INSERT INTO customisation_contribs ' . $db->sql_build_array('INSERT', ['contrib_user_id' => 2, 'contrib_type' => 8,"
+    "  'contrib_name' => 'Topic Tools', 'contrib_name_clean' => 'topic-tools', 'contrib_desc' => 'Adds a few handy tools for topics.',"
+    "  'contrib_status' => 2, 'contrib_visible' => 1, 'contrib_categories' => (string) $category, 'contrib_creation_time' => time() - 86400 * 40, 'contrib_last_update' => time() - 86400 * 3]));"
+    " $contrib = (int) $db->sql_nextid();"
+    " $db->sql_query('INSERT INTO customisation_contrib_in_categories ' . $db->sql_build_array('INSERT', ['contrib_id' => $contrib, 'category_id' => $category]));"
+    " $r = $db->sql_query('SELECT user_id FROM customisation_authors WHERE user_id = 2');"
+    " if (!$db->sql_fetchrow($r)) { $db->sql_query('INSERT INTO customisation_authors ' . $db->sql_build_array('INSERT', ['user_id' => 2, 'author_contribs' => 1, 'author_desc' => ''])); }"
+    " $db->sql_freeresult($r); }"
+    "$readers = $auth->acl_get_list(ANONYMOUS, 'f_read'); $listers = $auth->acl_get_list(ANONYMOUS, 'f_list');"
+    "$r = $db->sql_query('SELECT t.topic_id, t.forum_id FROM ' . TOPICS_TABLE . ' t JOIN ' . FORUMS_TABLE . \" f ON f.forum_id = t.forum_id"
+    " WHERE f.forum_password = '' AND t.topic_status = 0 AND t.topic_visibility = 1 AND t.topic_moved_id = 0 AND t.topic_posts_approved >= 4\""
+    " . ' ORDER BY t.topic_posts_approved DESC, t.topic_id');"
+    "$topics = []; while ($t = $db->sql_fetchrow($r)) { $f = (int) $t['forum_id'];"
+    " if (in_array(ANONYMOUS, $readers[$f]['f_read'] ?? []) && in_array(ANONYMOUS, $listers[$f]['f_list'] ?? [])) { $topics[] = (int) $t['topic_id']; }"
+    " if (count($topics) === 2) { break; } }"
+    "$db->sql_freeresult($r);"
+    "echo json_encode(['contrib' => $contrib, 'topics' => $topics]);"
+)
+
+
+def shots_titaniatopictransfer(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/titaniatopictransfer: the Quick-mod option, the transfer page, the Titania support topic
+    the replies went to, and a forum topic closed after a copy, with its closing reply and link.
+
+    phpBB 4.0 and Titania only: needs --seed-board with a board that has Titania enabled before the
+    extension and seed-forum's standard fixtures, for example the one db-matrix.sh -b master -d sqlite -k
+    keeps when given the Titania checkout first. Sets up an approved "Topic Tools" contribution and gives
+    the admin Titania's permissions, then transfers two replies of the busiest public topic and copies and
+    closes the next one, as the admin, over HTTP.
+    """
+    if not isinstance(board, SeedBoard) or not board.sql("SELECT ext_active FROM phpbb_ext WHERE ext_name = 'phpbb/titania' "
+                                                          "AND ext_active = 1"):
+        raise RuntimeError("needs --seed-board with Titania enabled (db-matrix.sh -b master -d sqlite -k "
+                           "path/to/customisation-db path/to/titaniatopictransfer)")
+    out = board.php(TTT_SHOTS_PHP).strip().splitlines()
+    setup = json.loads(out[-1]) if out and out[-1].startswith("{") else {}
+    if len(setup.get("topics", [])) < 2:
+        raise RuntimeError(f"could not set up the contribution and topics: {' '.join(out)[-300:]}")
+    board.purge_cache()
+    contrib = str(setup["contrib"])
+    moved_topic, copied_topic = setup["topics"]
+    moved_posts = [int(r[0]) for r in board.sql("SELECT post_id FROM phpbb_posts WHERE topic_id = ? AND post_visibility = 1 "
+                                                "ORDER BY post_time, post_id", (moved_topic,))]
+
+    def open_quickmod(p) -> None:
+        trigger = p.locator(".quickmod .dropdown-trigger").first
+        trigger.scroll_into_view_if_needed()
+        p.mouse.wheel(0, 10000)
+        trigger.click()
+        # The transfer is the last option, below where the list starts to scroll
+        p.locator("#quickmod .dropdown-contents").evaluate("list => { list.scrollTop = list.scrollHeight; }")
+        option = p.locator("#quickmod a", has_text="Transfer to Titania support")
+        option.wait_for(state="visible")
+        option.hover()
+
+    def fill_form(p) -> None:
+        for post_id in moved_posts[-2:]:
+            p.locator(f"input[name='posts[]'][value='{post_id}']").check()
+        p.locator("#contribution_id").fill(contrib)
+
+    shoot.shot("transfer-quickmod", f"viewtopic.php?t={moved_topic}&sid={{sid}}", admin=True, prepare=open_quickmod)
+    shoot.shot("transfer-page", board.route(f"titania-transfer/{moved_topic}") + "?sid={sid}", admin=True,
+               selector="#page-body", prepare=fill_form)
+
+    admin = requests.Session()
+    board.login(admin)
+
+    def transfer(topic: int, data: dict) -> str:
+        page_url = f"{board.base}/" + board.route(f"titania-transfer/{topic}")
+        page = admin.get(page_url, timeout=30).text
+        token = dict(re.findall(r'name="(form_token|creation_time)" value="([^"]*)"', page))
+        time.sleep(1.1)  # phpBB's minimum time before a form may be submitted
+        response = admin.post(page_url, data={**token, **data, "contribution_id": contrib, "submit": ""}, timeout=60)
+        if "/db/" not in response.url:
+            raise RuntimeError(f"the transfer of topic {topic} did not reach Titania")
+        return response.url.replace(board.base + "/", "")
+
+    titania_url = transfer(moved_topic, {"posts[]": moved_posts[-2:]})
+    shoot.shot("transfer-titania-topic", titania_url, selector="#page-body")
+
+    copied_posts = [int(r[0]) for r in board.sql("SELECT post_id FROM phpbb_posts WHERE topic_id = ? AND post_visibility = 1",
+                                                 (copied_topic,))]
+    transfer(copied_topic, {"posts[]": copied_posts, "copy_topic": "1",
+                            "reason": "Support for Topic Tools now happens in its Customisation Database topic."})
+
+    # The closing reply, which links to the Titania topic
+    shoot.shot("transfer-closed-topic", f"viewtopic.php?t={copied_topic}", selector=".post:has(.content a[href*='/db/'])")
+
+
 SHOTS = {
     "phpbbmodders/translationhelper": shots_translationhelper,
     "phpbbmodders/prunenotifications": shots_prunenotifications,
@@ -1559,6 +1662,7 @@ SHOTS = {
     "phpbbmodders/stopforumspam": shots_stopforumspam,
     "phpbbmodders/banhammer": shots_banhammer,
     "phpbbmodders/groupwarn": shots_groupwarn,
+    "phpbbmodders/titaniatopictransfer": shots_titaniatopictransfer,
     "phpbbmodders/topicclaim": shots_topicclaim,
     "phpbbmodders/wiki": shots_wiki,
     "ProMinoDeux": shots_prominodeux,

@@ -1901,9 +1901,125 @@ def check_translationhelper(b: Board) -> None:
           "foreach ($it as $f) { $f->isDir() ? rmdir($f) : unlink($f); } rmdir($dir); }")
 
 
+TTT_FIXTURE_PHP = (
+    # Titania permissions for the test moderator, given directly so no role has to change
+    "$mod = (int) $argv_mod;"
+    "$r = $db->sql_query('SELECT auth_option_id FROM ' . ACL_OPTIONS_TABLE . \" WHERE auth_option \" . $db->sql_like_expression('u_titania' . $db->get_any_char()));"
+    "$rows = [];"
+    "while ($o = $db->sql_fetchrow($r)) { $rows[] = ['user_id' => $mod, 'forum_id' => 0, 'auth_option_id' => (int) $o['auth_option_id'], 'auth_role_id' => 0, 'auth_setting' => 1]; }"
+    "$db->sql_freeresult($r);"
+    "$db->sql_query('DELETE FROM ' . ACL_USERS_TABLE . ' WHERE user_id = ' . $mod . ' AND forum_id = 0');"
+    "$db->sql_multi_insert(ACL_USERS_TABLE, $rows);"
+    "$auth->acl_clear_prefetch();"
+    # A public forum guests can see and read
+    "$readers = $auth->acl_get_list(ANONYMOUS, 'f_read'); $listers = $auth->acl_get_list(ANONYMOUS, 'f_list');"
+    "$r = $db->sql_query('SELECT forum_id FROM ' . FORUMS_TABLE . \" WHERE forum_type = \" . FORUM_POST . \" AND forum_password = '' ORDER BY left_id\");"
+    "$forum_id = 0;"
+    "while ($f = $db->sql_fetchrow($r)) { $id = (int) $f['forum_id'];"
+    " if (in_array(ANONYMOUS, $readers[$id]['f_read'] ?? []) && in_array(ANONYMOUS, $listers[$id]['f_list'] ?? [])) { $forum_id = $id; break; } }"
+    "$db->sql_freeresult($r);"
+    # A category, an approved public contribution, and its author profile. Their TEXT columns have no
+    # default, which MySQL and MariaDB refuse, so every one is given.
+    "$r = $db->sql_query('SELECT MAX(right_id) AS r FROM customisation_categories'); $right = (int) $db->sql_fetchfield('r'); $db->sql_freeresult($r);"
+    "$db->sql_query('INSERT INTO customisation_categories ' . $db->sql_build_array('INSERT', ['parent_id' => 0, 'left_id' => $right + 1, 'right_id' => $right + 2,"
+    " 'category_type' => 8, 'category_name' => 'Transfer Check', 'category_name_clean' => 'transfer-check', 'category_desc' => '', 'category_contribs' => 1]));"
+    "$category = (int) $db->sql_nextid();"
+    "$db->sql_query('INSERT INTO customisation_contribs ' . $db->sql_build_array('INSERT', ['contrib_user_id' => 2, 'contrib_type' => 8,"
+    " 'contrib_name' => 'Transfer Check', 'contrib_name_clean' => 'transfer-check', 'contrib_desc' => 'Feature check fixture.',"
+    " 'contrib_status' => 2, 'contrib_visible' => 1, 'contrib_categories' => (string) $category, 'contrib_creation_time' => time(), 'contrib_last_update' => time()]));"
+    "$contrib = (int) $db->sql_nextid();"
+    "$db->sql_query('INSERT INTO customisation_contrib_in_categories ' . $db->sql_build_array('INSERT', ['contrib_id' => $contrib, 'category_id' => $category]));"
+    "$r = $db->sql_query('SELECT user_id FROM customisation_authors WHERE user_id = 2');"
+    "if (!$db->sql_fetchrow($r)) { $db->sql_query('INSERT INTO customisation_authors ' . $db->sql_build_array('INSERT', ['user_id' => 2, 'author_contribs' => 1, 'author_desc' => ''])); }"
+    "$db->sql_freeresult($r);"
+    # Two forum topics of three posts each, written as the board admin
+    "require_once 'includes/functions_posting.php';"
+    "$r = $db->sql_query('SELECT * FROM ' . USERS_TABLE . ' WHERE user_id = 2'); $user->data = array_merge($user->data, $db->sql_fetchrow($r)); $db->sql_freeresult($r);"
+    "$auth->acl($user->data);"
+    "$topics = [];"
+    "foreach (['Transfer check replies', 'Transfer check copy'] as $title) { $topic_id = 0; $posts = [];"
+    " foreach (['opening post', 'first reply', 'second reply'] as $i => $text) {"
+    "  $message = $title . ': ' . $text; $uid = $bitfield = ''; $flags = 0; generate_text_for_storage($message, $uid, $bitfield, $flags, true, true, true);"
+    "  $data = ['forum_id' => $forum_id, 'topic_id' => $topic_id, 'topic_title' => $title, 'icon_id' => 0, 'enable_bbcode' => true, 'enable_smilies' => true,"
+    "   'enable_urls' => true, 'enable_sig' => false, 'message' => $message, 'message_md5' => md5($message), 'bbcode_bitfield' => $bitfield, 'bbcode_uid' => $uid,"
+    "   'post_edit_locked' => 0, 'force_approved_state' => ITEM_APPROVED, 'enable_indexing' => true, 'notify' => false, 'notify_set' => false, 'post_time' => time() - 100 + $i];"
+    "  $poll = []; submit_post($topic_id ? 'reply' : 'post', $title, '', POST_NORMAL, $poll, $data);"
+    "  $topic_id = (int) $data['topic_id']; $posts[] = (int) $data['post_id']; }"
+    " $topics[] = ['topic' => $topic_id, 'posts' => $posts]; }"
+    "echo json_encode(['forum' => $forum_id, 'contrib' => $contrib, 'topics' => $topics]);"
+)
+
+
+def check_titaniatopictransfer(b: Board) -> None:
+    """phpbbmodders/titaniatopictransfer: a moderator moves a reply from a forum topic to a new Titania support
+    topic through the Quick-mod transfer page, then copies a whole topic and closes the original; guests are
+    refused, and a bad selection shows a translated error without changing anything."""
+    mod_pw = secrets.token_urlsafe(12)
+    mod_id = b.add_user("ttmod", mod_pw)
+    b.php(f"group_user_add(4, [{mod_id}]);")  # Global moderators: m_move, m_delete, m_lock
+    out = b.php(f"$argv_mod = {mod_id};" + TTT_FIXTURE_PHP).strip().splitlines()
+    fixture = json.loads(out[-1]) if out and out[-1].startswith("{") else {}
+    ok(fixture.get("forum") and fixture.get("contrib") and len(fixture.get("topics", [])) == 2,
+       "a public forum, an approved contribution and two forum topics are set up"
+       + ("" if fixture else f": {' '.join(out)[-300:]}"))
+    if not fixture:
+        return
+    b.purge_cache()
+    first, second = fixture["topics"]
+
+    mod = requests.Session()
+    b.login(mod, "ttmod", mod_pw)
+    ok("Transfer to Titania support" in mod.get(f"{b.base}/viewtopic.php?t={first['topic']}", timeout=30).text,
+       "the topic's Quick-mod tools offer the transfer")
+    page_url = f"{b.base}/" + b.route(f"titania-transfer/{first['topic']}")
+    ok(requests.get(page_url, timeout=30).status_code == 403, "guests are refused the transfer page")
+    page = mod.get(page_url, timeout=30).text
+    ok(all(f'value="{post_id}"' in page for post_id in first["posts"]), "the transfer page lists the topic's posts")
+
+    # A copy needs the whole topic: translated error, nothing changes
+    action, fields = form_fields(page, "titania_transfer")
+    body = post_back(mod, b.base, page_url, action, {**fields, "posts[]": [first["posts"][2]], "copy_topic": "1",
+                                                    "contribution_id": str(fixture["contrib"]), "reason": "x",
+                                                    "submit": "1"})
+    ok("Copy and close needs every post in the topic to be selected." in body,
+       "copying part of a topic shows a translated error")
+
+    # Move one reply to a new support topic
+    action, fields = form_fields(mod.get(page_url, timeout=30).text, "titania_transfer")
+    time.sleep(1.1)
+    moved = mod.post(page_url if not action else f"{b.base}/" + action.lstrip("./"),
+                     data={**fields, "posts[]": [first["posts"][2]], "contribution_id": str(fixture["contrib"]),
+                           "submit": "1"}, timeout=60)
+    ok("/db/" in moved.url and moved.status_code == 200, f"the transfer ends on the Titania support topic ({moved.url})")
+    left = b.sql("SELECT post_id FROM phpbb_posts WHERE topic_id = ? ORDER BY post_id", (first["topic"],))
+    ok([int(r[0]) for r in left] == first["posts"][:2], "the moved reply is gone from the forum topic")
+    copied = b.sql("SELECT COUNT(*) FROM customisation_posts WHERE post_text LIKE ?", ("%Transfer check replies: second reply%",))
+    ok(copied and int(copied[0][0]) == 1, "the reply is in Titania")
+    logged = b.sql("SELECT COUNT(*) FROM phpbb_log WHERE log_operation = 'LOG_TITANIATOPICTRANSFER' AND topic_id = ?",
+                   (first["topic"],))
+    ok(logged and int(logged[0][0]) == 1, "the transfer is in the moderator log")
+
+    # Copy a whole topic and close the original with a reason
+    page_url = f"{b.base}/" + b.route(f"titania-transfer/{second['topic']}")
+    action, fields = form_fields(mod.get(page_url, timeout=30).text, "titania_transfer")
+    time.sleep(1.1)
+    copy = mod.post(page_url if not action else f"{b.base}/" + action.lstrip("./"),
+                    data={**fields, "posts[]": second["posts"], "copy_topic": "1", "reason": "Support belongs in the CDB",
+                          "contribution_id": str(fixture["contrib"]), "submit": "1"}, timeout=60)
+    ok("/db/" in copy.url, "copy and close ends on the Titania support topic")
+    status = b.sql("SELECT topic_status FROM phpbb_topics WHERE topic_id = ?", (second["topic"],))
+    ok(status and int(status[0][0]) == 1, "the forum topic is locked")
+    kept = b.sql("SELECT post_text FROM phpbb_posts WHERE topic_id = ? ORDER BY post_id", (second["topic"],))
+    ok(len(kept) == 4 and "Support belongs in the CDB" in kept[-1][0] and f"{b.base}/" in kept[-1][0] and "/db/" in kept[-1][0],
+       "the original posts stay, with a closing reply giving the reason and an absolute link")
+    copied = b.sql("SELECT COUNT(*) FROM customisation_posts WHERE post_text LIKE ?", ("%Transfer check copy:%",))
+    ok(copied and int(copied[0][0]) == 3, "all three posts are copied to Titania")
+
+
 CHECKS = {
     "phpbbmodders/knowledgebase": check_knowledgebase,
     "phpbbmodders/translationhelper": check_translationhelper,
+    "phpbbmodders/titaniatopictransfer": check_titaniatopictransfer,
     "phpbbmodders/prunenotifications": check_prunenotifications,
     "phpbbmodders/feedlinks": check_feedlinks,
     "phpbbmodders/restorejumpbox": check_restorejumpbox,
