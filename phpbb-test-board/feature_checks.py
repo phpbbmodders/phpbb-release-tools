@@ -2016,10 +2016,191 @@ def check_titaniatopictransfer(b: Board) -> None:
     ok(copied and int(copied[0][0]) == 3, "all three posts are copied to Titania")
 
 
+TRI_FIXTURE_PHP = (
+    # Titania's permissions for the board admin, given directly so no role has to change
+    "$r = $db->sql_query('SELECT auth_option_id FROM ' . ACL_OPTIONS_TABLE . \" WHERE auth_option \" . $db->sql_like_expression('u_titania' . $db->get_any_char()));"
+    "$rows = [];"
+    "while ($o = $db->sql_fetchrow($r)) { $rows[] = ['user_id' => 2, 'forum_id' => 0, 'auth_option_id' => (int) $o['auth_option_id'], 'auth_role_id' => 0, 'auth_setting' => 1]; }"
+    "$db->sql_freeresult($r);"
+    "$db->sql_query('DELETE FROM ' . ACL_USERS_TABLE . ' WHERE user_id = 2 AND forum_id = 0');"
+    "$db->sql_multi_insert(ACL_USERS_TABLE, $rows);"
+    "$auth->acl_clear_prefetch();"
+    # A category and an approved extension contribution of the admin's. Titania's TEXT columns have no
+    # default, which MySQL and MariaDB refuse, so every one is given.
+    "$r = $db->sql_query('SELECT MAX(right_id) AS r FROM customisation_categories'); $right = (int) $db->sql_fetchfield('r'); $db->sql_freeresult($r);"
+    "$db->sql_query('INSERT INTO customisation_categories ' . $db->sql_build_array('INSERT', ['parent_id' => 0, 'left_id' => $right + 1, 'right_id' => $right + 2,"
+    " 'category_type' => 8, 'category_name' => 'Release Import', 'category_name_clean' => 'release-import', 'category_desc' => '', 'category_contribs' => 1]));"
+    "$category = (int) $db->sql_nextid();"
+    "$db->sql_query('INSERT INTO customisation_contribs ' . $db->sql_build_array('INSERT', ['contrib_user_id' => 2, 'contrib_type' => 8,"
+    " 'contrib_name' => 'Release Import Check', 'contrib_name_clean' => 'release_import_check', 'contrib_desc' => 'Feature check fixture.',"
+    " 'contrib_status' => 2, 'contrib_visible' => 1, 'contrib_categories' => (string) $category, 'contrib_creation_time' => time(), 'contrib_last_update' => time()]));"
+    "$contrib = (int) $db->sql_nextid();"
+    "$db->sql_query('INSERT INTO customisation_contrib_in_categories ' . $db->sql_build_array('INSERT', ['contrib_id' => $contrib, 'category_id' => $category]));"
+    "$r = $db->sql_query('SELECT user_id FROM customisation_authors WHERE user_id = 2');"
+    "if (!$db->sql_fetchrow($r)) { $db->sql_query('INSERT INTO customisation_authors ' . $db->sql_build_array('INSERT', ['user_id' => 2, 'author_contribs' => 1, 'author_desc' => ''])); }"
+    "$db->sql_freeresult($r);"
+    "echo json_encode(['contrib' => $contrib]);"
+)
+
+
+def github_stand_in(zip_bytes: bytes) -> tuple:
+    """Serve a local stand-in for GitHub's release API and downloads, on a free port.
+
+    Returns (base URL, server). Releases of owner/repo: v1.0.0 has one ZIP file, whose download redirects
+    once, as GitHub's do; v2.0.0 has two; v3.0.0 points its file at an address the extension must refuse.
+    """
+    import http.server
+    import socketserver
+    import threading
+
+    holder: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args) -> None:
+            pass
+
+        def send(self, status: int, body: bytes = b"", headers: dict = None) -> None:
+            self.send_response(status)
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            base = holder["base"]
+
+            def asset(name: str, url: str) -> dict:
+                return {"name": name, "size": len(zip_bytes), "browser_download_url": url, "content_type": "application/zip"}
+
+            releases = {
+                "v1.0.0": [asset("demo_1.0.0.zip", f"{base}/web/owner/repo/releases/download/v1.0.0/demo_1.0.0.zip"),
+                           asset("checksums.txt", f"{base}/web/owner/repo/releases/download/v1.0.0/checksums.txt")],
+                "v2.0.0": [asset("demo_a.zip", f"{base}/web/a.zip"), asset("demo_b.zip", f"{base}/web/b.zip")],
+                "v3.0.0": [asset("demo_3.0.0.zip", "http://169.254.169.254/latest/demo_3.0.0.zip")],
+            }
+            prefix = "/api/repos/owner/repo/releases/tags/"
+            if self.path.startswith(prefix) and self.path[len(prefix):] in releases:
+                tag = self.path[len(prefix):]
+                body = json.dumps({"tag_name": tag, "name": f"Demo {tag}", "assets": releases[tag]}).encode()
+                self.send(200, body, {"Content-Type": "application/json"})
+            elif self.path == "/web/owner/repo/releases/download/v1.0.0/demo_1.0.0.zip":
+                self.send(302, b"", {"Location": "/web/files/demo_1.0.0.zip"})
+            elif self.path == "/web/files/demo_1.0.0.zip":
+                self.send(200, zip_bytes, {"Content-Type": "application/zip"})
+            else:
+                self.send(404, b'{"message":"Not Found"}', {"Content-Type": "application/json"})
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    holder["base"] = f"http://127.0.0.1:{server.server_address[1]}"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return holder["base"], server
+
+
+def check_titaniareleaseimport(b: Board) -> None:
+    """phpbbmodders/titaniareleaseimport: an author links the contribution's GitHub repository on its manage
+    page, then imports a release's ZIP file as a new revision's file from the New Revision page, against a
+    local stand-in for GitHub. A repository of another service, a release of another repository, a missing
+    release, a release with two ZIP files and a file on a refused address each give a translated error."""
+    out = b.php(TRI_FIXTURE_PHP).strip().splitlines()
+    fixture = json.loads(out[-1]) if out and out[-1].startswith("{") else {}
+    ok(fixture.get("contrib"), "an approved extension contribution of the admin's is set up"
+       + ("" if fixture else f": {' '.join(out)[-300:]}"))
+    if not fixture:
+        return
+    contrib = fixture["contrib"]
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("phpbbmodders/demo/composer.json", json.dumps({"name": "phpbbmodders/demo", "type": "phpbb-extension"}))
+        archive.writestr("phpbbmodders/demo/ext.php", "<?php\nnamespace phpbbmodders\\demo;\nclass ext extends \\phpbb\\extension\\base {}\n")
+    base, server = github_stand_in(buffer.getvalue())
+    try:
+        b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = 'titaniareleaseimport_github_api'", (f"{base}/api",))
+        if not b.sql("SELECT config_name FROM phpbb_config WHERE config_name = 'titaniareleaseimport_github_api'"):
+            b.sql("INSERT INTO phpbb_config (config_name, config_value, is_dynamic) VALUES ('titaniareleaseimport_github_api', ?, 0)", (f"{base}/api",))
+            b.sql("INSERT INTO phpbb_config (config_name, config_value, is_dynamic) VALUES ('titaniareleaseimport_github_web', ?, 0)", (f"{base}/web",))
+        b.purge_cache()
+
+        admin = requests.Session()
+        b.login(admin)
+        manage_url = f"{b.base}/" + b.route("db/extension/release_import_check/manage")
+        revision_url = f"{b.base}/" + b.route("db/extension/release_import_check/revision")
+
+        page = admin.get(revision_url, timeout=60).text
+        ok("link the contribution’s source repository" in page, "New Revision asks for the repository while none is linked")
+
+        def browser_fields(page: str, form_id: str) -> tuple:
+            """A form's action and every value a browser would send for it as it stands."""
+            block = re.search(r'(?s)<form[^>]*id="%s"[^>]*>.*?</form>' % form_id, page)
+            block = block.group(0) if block else page
+            action = re.search(r'<form[^>]*action="([^"]*)"', block)
+            fields: dict = {}
+            for tag in re.findall(r"<input[^>]*>", block):
+                name = re.search(r'name="([^"]+)"', tag)
+                kind = (re.search(r'type="([^"]+)"', tag) or [None, "text"])[1]
+                if not name or kind in ("submit", "button", "file", "reset") or (kind in ("checkbox", "radio") and "checked" not in tag):
+                    continue
+                # Browsers send "on" for a checkbox without a value, and an empty string for a text field
+                value = html.unescape((re.search(r'value="([^"]*)"', tag) or [None, "on" if kind in ("checkbox", "radio") else ""])[1])
+                fields.setdefault(name.group(1), []).append(value)
+            for name, options in re.findall(r'(?s)<select[^>]*name="([^"]+)"[^>]*>(.*?)</select>', block):
+                fields[name] = [html.unescape(v) for v in re.findall(r'<option[^>]*value="([^"]*)"[^>]*selected', options)]
+            for name, text in re.findall(r'(?s)<textarea[^>]*name="([^"]+)"[^>]*>(.*?)</textarea>', block):
+                fields[name] = [html.unescape(text)]
+            flat = {k: (v if k.endswith("[]") else v[-1] if v else "") for k, v in fields.items()}
+            # Titania writes absolute form addresses; post_back() takes them relative to the board
+            return (html.unescape(action.group(1)).replace(b.base + "/", "") if action else ""), flat
+
+        def save_repository(value: str) -> str:
+            action, fields = browser_fields(admin.get(manage_url, timeout=60).text, "postform")
+            fields.update({"titaniareleaseimport_provider": "github", "titaniareleaseimport_repository": value, "submit": "1"})
+            return post_back(admin, b.base, manage_url, action, fields)
+
+        body = save_repository("https://gitlab.com/owner/repo")
+        ok("The source repository is not a GitHub repository address." in body
+           and not b.sql("SELECT contrib_id FROM phpbb_titaniareleaseimport_repos"),
+           "a repository of another service is refused")
+        save_repository(f"{base}/web/owner/repo")
+        linked = b.sql("SELECT provider, repository FROM phpbb_titaniareleaseimport_repos WHERE contrib_id = ?", (contrib,))
+        ok(linked and tuple(linked[0]) == ("github", "owner/repo"), f"the repository is linked to the contribution ({linked})")
+
+        def import_release(release: str, asset: str = "") -> str:
+            action, fields = browser_fields(admin.get(revision_url, timeout=60).text, "postform")
+            fields.update({"titaniareleaseimport_release": release, "titaniareleaseimport_asset": asset, "new_revision": "1"})
+            return post_back(admin, b.base, revision_url, action, fields)
+
+        page = admin.get(revision_url, timeout=60).text
+        ok('name="titaniareleaseimport_release"' in page and "owner/repo" in page, "New Revision offers the import from the linked repository")
+        cases = [
+            ("https://github.com/other/repo/releases/tag/v1.0.0".replace("https://github.com", f"{base}/web"), "",
+             "That release belongs to other/repo, not to this contribution’s repository, owner/repo.", "a release of another repository"),
+            ("v9.9.9", "", "There is no published release v9.9.9 in owner/repo.", "a release that does not exist"),
+            ("v2.0.0", "", "has more than one ZIP file. Enter the one to use under File name: demo_a.zip, demo_b.zip.", "a release with two ZIP files"),
+            ("v3.0.0", "", "The release file is not served from an address this board may download from.", "a file on a refused address"),
+        ]
+        for release, asset, message, label in cases:
+            ok(message in import_release(release, asset), f"{label} is refused with a translated error")
+        ok(not b.sql("SELECT attachment_id FROM customisation_attachments WHERE real_filename LIKE 'demo%'"), "and nothing was attached")
+
+        # The import, without a version: Titania then asks for the version, not for a file
+        body = import_release(f"{base}/web/owner/repo/releases/tag/v1.0.0")
+        attached = b.sql("SELECT filesize, attachment_directory FROM customisation_attachments WHERE real_filename = 'demo_1.0.0.zip'")
+        shown = "; ".join(re.sub(r"<[^>]+>", " ", e).strip() for e in re.findall(r'(?s)<p class="error">(.*?)</p>', body))
+        ok(attached and int(attached[0][0]) == len(buffer.getvalue()),
+           f"the release's ZIP file is attached ({attached})" + ("" if attached else f": {shown[:300]}"))
+        ok("Please enter a version for the revision" in body and "Please select a file to upload" not in body,
+           "Titania counts it as the revision's file")
+    finally:
+        server.shutdown()
+
+
 CHECKS = {
     "phpbbmodders/knowledgebase": check_knowledgebase,
     "phpbbmodders/translationhelper": check_translationhelper,
     "phpbbmodders/titaniatopictransfer": check_titaniatopictransfer,
+    "phpbbmodders/titaniareleaseimport": check_titaniareleaseimport,
     "phpbbmodders/prunenotifications": check_prunenotifications,
     "phpbbmodders/feedlinks": check_feedlinks,
     "phpbbmodders/restorejumpbox": check_restorejumpbox,
