@@ -126,6 +126,8 @@ For each phpBB branch and database, builds a seed-forum board with the extension
 
 An extension that needs another extension enabled first goes after it on the command line. phpbbmodders/titaniatopictransfer needs Titania (phpbb/customisation-db), on phpBB 4.0 only, with a Titania checkout that runs there: `db-matrix.sh -b master path/to/customisation-db path/to/titaniatopictransfer`. Titania has no check of its own, so only its disable/purge/enable round trip runs; the transfer check sets up its own contribution, forum topics and moderator.
 
+To try the transfer by hand, keep such a board with `--keep` and add demo data with `titania_demo.py -b BOARD_DIR`: four extension contributions in Titania and an "Extension support" forum with support topics about them, still in the forum, plus Titania's permissions for the admin login. Serve the board with seed-forum's `bin/board-php.py BOARD_DIR -S 127.0.0.1:PORT -t BOARD_DIR`.
+
 To test against a phpBB core change that isn't merged yet, `-P N` (`--phpbb-pull-request`) builds the `master` boards from open phpbb/phpbb pull request N instead of the `master` branch, through seed-forum's `board.phpbb_pull_request`. Those boards get their own folders (`master-prN-<database>`). For example, phpbbmodders/restorejumpbox only does anything once phpbb/phpbb#6927 removes core's jumpbox: `db-matrix.sh -b master -P 6927 path/to/restorejumpbox`.
 
 The MSSQL container accepts Microsoft's SQL Server Developer licence; leave `mssql` out of `-d` if that hasn't been agreed. Needs Docker and a seed-forum checkout with `board.database` support.
