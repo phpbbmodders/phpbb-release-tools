@@ -1165,6 +1165,21 @@ def shots_topicclaim(board: Board, shoot: Shooter, args: argparse.Namespace) -> 
                admin=True)
 
 
+def shots_authorcolumn(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/authorcolumn: the Author column in a forum's topic list and in topic search results,
+    and the same forum on a phone, where the column is hidden.
+
+    Needs a board with forums and topics: run with --seed and seed-forum's
+    bin/seed-standard-fixtures.php. The search shot is Active topics: the
+    fixtures are posted during the run, so every topic is in it.
+    """
+    forum, _ = busiest_forum_and_topic(board)
+
+    shoot.shot("authorcolumn-viewforum", f"viewforum.php?f={forum}", selector="#page-body")
+    shoot.shot("authorcolumn-search", "search.php?search_id=active_topics", selector="#page-body")
+    shoot.shot("authorcolumn-viewforum-phone", f"viewforum.php?f={forum}", phone=True)
+
+
 def shots_printallposts(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/printallposts: the Print all link in the Topic tools menu and the page it opens.
 
@@ -1646,6 +1661,7 @@ SHOTS = {
     "phpbbmodders/prunenotifications": shots_prunenotifications,
     "phpbbmodders/seenotes": shots_seenotes,
     "phpbbmodders/adduser": shots_adduser,
+    "phpbbmodders/authorcolumn": shots_authorcolumn,
     "phpbbmodders/autodbbackup": shots_autodbbackup,
     "phpbbmodders/contactadmin": shots_contactadmin,
     "phpbbmodders/elonw": shots_elonw,
