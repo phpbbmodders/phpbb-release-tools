@@ -1165,6 +1165,46 @@ def shots_topicclaim(board: Board, shoot: Shooter, args: argparse.Namespace) -> 
                admin=True)
 
 
+def shots_ageverification(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
+    """phpbbmodders/ageverification: the age confirmation page as a guest (on a computer and a phone),
+    the same page when login is required, the "too young" page, the ACP settings, and the per-forum
+    setting in Manage forums.
+
+    Run with --seed and seed-forum's bin/seed-standard-fixtures.php so Manage forums has a forum to
+    edit. Asking on the whole board is turned on for the board shots; the ACP is never asked, so the
+    admin shots are unaffected.
+    """
+    forum, _ = busiest_forum_and_topic(board)
+    gate = board.route("ageverification")
+    cookie_name = board.sql("SELECT config_value FROM phpbb_config WHERE config_name = 'cookie_name'")[0][0]
+    set_config(board, {"ageverification_enabled": "1", "ageverification_require_login": "0"})
+
+    def said_too_young(p) -> None:
+        # The "too young" page as a visitor who pressed "I am under 18" sees it: the answer is
+        # remembered in a cookie, so there is no link back to the buttons
+        p.context.add_cookies([{"name": f"{cookie_name}_ageverification_no", "value": "1", "url": p.url}])
+        p.reload()
+
+    shoot.shot("ageverification-page", gate, selector="#wrap")
+    shoot.shot("ageverification-page-phone", gate, phone=True)
+    shoot.shot("ageverification-too-young", board.route("ageverification/leave"), selector="#wrap",
+               prepare=said_too_young)
+    set_config(board, {"ageverification_require_login": "1"})
+    shoot.shot("ageverification-login-required", gate, selector="#wrap")
+    set_config(board, {"ageverification_require_login": "0"})
+    shoot.shot("ageverification-acp-settings",
+               "adm/index.php?i=-phpbbmodders-ageverification-acp-main_module&mode=settings&sid={sid}",
+               admin=True, full_page=True)
+    # Only some forums asking, with this one switched on
+    set_config(board, {"ageverification_enabled": "0"})
+    board.sql("UPDATE phpbb_forums SET forum_ageverification = 1 WHERE forum_id = ?", (forum,))
+    board.purge_cache()
+    shoot.shot("ageverification-acp-forum", f"adm/index.php?i=acp_forums&mode=manage&action=edit&f={forum}&sid={{sid}}",
+               admin=True, selector="fieldset:has(#forum_ageverification)")
+    board.sql("UPDATE phpbb_forums SET forum_ageverification = 0 WHERE forum_id = ?", (forum,))
+    board.purge_cache()
+
+
 def shots_authorcolumn(board: Board, shoot: Shooter, args: argparse.Namespace) -> None:
     """phpbbmodders/authorcolumn: the Author column in a forum's topic list and in topic search results,
     and the same forum on a phone, where the column is hidden.
@@ -1661,6 +1701,7 @@ SHOTS = {
     "phpbbmodders/prunenotifications": shots_prunenotifications,
     "phpbbmodders/seenotes": shots_seenotes,
     "phpbbmodders/adduser": shots_adduser,
+    "phpbbmodders/ageverification": shots_ageverification,
     "phpbbmodders/authorcolumn": shots_authorcolumn,
     "phpbbmodders/autodbbackup": shots_autodbbackup,
     "phpbbmodders/contactadmin": shots_contactadmin,

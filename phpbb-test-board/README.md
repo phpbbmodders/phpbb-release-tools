@@ -173,6 +173,8 @@ Saves PNG screenshots of an extension's or style's pages with [Playwright](https
 
 `phpbbmodders/topicclaim` needs `--seed` with seed-forum's standard fixtures, for its `forum_moderator` user. That user claims the busiest topic with a note, and the admin claims another topic in the same forum. Claims show only to moderators, so every shot is taken as the admin: the forum's topic list, the claim notice on the topic page, the claim page (with take over, transfer and release), MCP → Claimed topics and the ACP settings.
 
+`phpbbmodders/ageverification` turns on asking on the whole board and saves, as a guest, the age confirmation page (on a computer and a phone), the same page with login required, and the "too young" page as a visitor who said no sees it (the cookie that remembers the answer is set first, so there is no link back). As the admin it saves the ACP settings (in full) and the forum setting in Manage forums, with asking on the whole board turned off and that forum switched on. Use `--seed` with seed-forum's standard fixtures.
+
 `phpbbmodders/printallposts` sets the board to two posts per page, so the busiest topic spans two pages, then saves the **Topic tools** menu open on it and the **Print all** page showing every post, both as a guest. Use `--seed` with seed-forum's standard fixtures.
 
 `phpbbmodders/posteripinviewtopic` gives the busiest topic's posts the IP address 8.8.8.8 (seeded posts come from 127.0.0.1, which the extension hides) and saves, as the admin, the address in a post's profile column and its lookup popup. The lookup is real: the board asks ip-api.com, so the run needs internet access. Use `--seed` with seed-forum's standard fixtures.

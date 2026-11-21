@@ -27,6 +27,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _venv import ensure_venv  # noqa: E402
@@ -2016,7 +2017,250 @@ def check_titaniatopictransfer(b: Board) -> None:
     ok(copied and int(copied[0][0]) == 3, "all three posts are copied to Titania")
 
 
+def check_ageverification(b: Board) -> None:
+    """phpbbmodders/ageverification: board-wide age verification sends guests to the confirmation page and back after they confirm,
+    leaves bots, command-line scripts and the login/ACP pages alone, saves a member's answer on their account, asks
+    again when the age is raised, skips members with an old enough birthday when set, makes guests log in when
+    login is required, asks in a forum and the forums below it and keeps that forum out of search, feeds and
+    attachment links, remembers a "too young" answer, turns away members whose birthday is too young, marks its
+    pages noindex, never redirects off the board, saves its ACP settings, and asks everyone again on request."""
+    gate_path = b.route("ageverification")
+
+    def set_config(name: str, value: object) -> None:
+        b.sql("UPDATE phpbb_config SET config_value = ? WHERE config_name = ?", (str(value), name))
+
+    def gated(session: requests.Session, path: str, **kwargs) -> bool:
+        """Whether a page sends the visitor to the gate."""
+        r = session.get(f"{b.base}/{path}", allow_redirects=False, **kwargs)
+        return r.status_code in (301, 302, 303) and gate_path in r.headers.get("Location", "")
+
+    def confirm(session: requests.Session, query: str = "", keep_cookie: bool = True) -> requests.Response:
+        """Press "I am ... or older" on the gate page and follow the one hop back to it that checks the
+        cookie was kept; return the response after that, without following it. keep_cookie=False drops the
+        cookie first, like a browser with cookies turned off."""
+        page_url = f"{b.base}/{gate_path}{query}"
+        action, fields = form_fields(session.get(page_url).text, "ageverification")
+        time.sleep(1.1)  # phpBB's minimum time before a form may be submitted
+        r = session.post(f"{b.base}/" + action.lstrip("./") if action else page_url,
+                         data={**fields, "ageverification_confirm": "1"}, allow_redirects=False)
+        if not keep_cookie:
+            for cookie in [c for c in session.cookies if c.name.endswith("_ageverification")]:
+                session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+        location = r.headers.get("Location", "")
+        if gate_path in location and "checked=1" in location:
+            r = session.get(location, allow_redirects=False)
+        return r
+
+    topic = b.sql("SELECT f.forum_id, f.parent_id, MIN(t.topic_id) FROM phpbb_forums f "
+                  "JOIN phpbb_topics t ON t.forum_id = f.forum_id WHERE f.parent_id <> 0 "
+                  "GROUP BY f.forum_id, f.parent_id, f.left_id ORDER BY f.left_id")
+    forum_id, parent_id, topic_id = (int(v) for v in topic[0])
+
+    guest = requests.Session()
+    ok(not gated(guest, "index.php"), "nothing is gated until the admin turns it on")
+
+    set_config("ageverification_enabled", 1)
+    b.purge_cache()
+    r = guest.get(f"{b.base}/viewtopic.php?t={topic_id}", allow_redirects=False)
+    location = r.headers.get("Location", "")
+    remembered = parse_qs(urlsplit(location).query).get("redirect", [""])[0]
+    ok(gate_path in location and remembered == f"viewtopic.php?t={topic_id}",
+       "the board-wide gate sends a guest to the gate page, remembering the page they asked for")
+    gate_page = guest.get(location).text
+    ok('name="ageverification_confirm"' in gate_page and "I am 18 or older" in gate_page and "I am under 18" in gate_page,
+       "the gate page shows both buttons")
+    ok('<meta name="robots" content="noindex">' in gate_page, "the gate page asks search engines not to index it")
+    for path in ("ucp.php?mode=login", "ucp.php?mode=terms", "ucp.php?mode=privacy", "adm/index.php", gate_path,
+                 b.route("ageverification/leave")):
+        ok(not gated(guest, path), f"{path} is never gated")
+    ok("Sorry, you must be 18 or older" in guest.get(f"{b.base}/{b.route('ageverification/leave')}").text,
+       "the leave page explains the minimum age")
+    bot_agent = b.sql("SELECT bot_agent FROM phpbb_bots WHERE bot_active = 1 ORDER BY bot_id")[0][0]
+    ok(not gated(requests.Session(), "index.php", headers={"User-Agent": f"Mozilla/5.0 ({bot_agent})"}),
+       "search engine bots never see the gate")
+
+    r = confirm(guest, f"?redirect=viewtopic.php%3Ft%3D{topic_id}")
+    ok(f"viewtopic.php?t={topic_id}" in r.headers.get("Location", ""), "confirming goes back to the page asked for")
+    ok(any(c.name.endswith("_ageverification") for c in guest.cookies), "confirming sets the gate cookie")
+    ok(not gated(guest, f"viewtopic.php?t={topic_id}") and not gated(guest, "index.php"),
+       "a guest who confirmed is not asked again")
+    location = confirm(requests.Session(), "?redirect=https%3A%2F%2Fexample.com%2F").headers.get("Location", "")
+    ok(location.startswith(b.base + "/"), "the gate never redirects off the board")
+    r = confirm(requests.Session(), keep_cookie=False)
+    ok(r.status_code == 200 and "allow cookies" in r.text, "a guest whose browser refuses the cookie is told why")
+
+    young = requests.Session()
+    page_url = f"{b.base}/{gate_path}"
+    action, fields = form_fields(young.get(page_url).text, "ageverification")
+    time.sleep(1.1)
+    page = young.post(page_url, data={**fields, "ageverification_leave": "1"}).text
+    ok("Sorry, you must be 18 or older" in page and any(c.name.endswith("_ageverification_no") for c in young.cookies),
+       '"I am under 18" shows the too young page and remembers the answer')
+    page = young.get(page_url).text
+    ok("Sorry, you must be 18 or older" in page and 'name="ageverification_confirm"' not in page
+       and "Back to the age confirmation" not in page, "a visitor who said they are too young cannot try again")
+
+    out = b.php("echo 'cli-ok';")  # b.php sets up a user, which runs the extension's check
+    ok("cli-ok" in out, "command-line scripts are never sent to the confirmation page")
+
+    member_pw = secrets.token_urlsafe(12)
+    member_id = b.add_user("agmember", member_pw)
+    member = requests.Session()
+    b.login(member, "agmember", member_pw)
+    ok(gated(member, "index.php"), "a member who never confirmed sees the gate")
+    confirm(member)
+    stored = b.sql("SELECT user_ageverification FROM phpbb_users WHERE user_id = ?", (member_id,))
+    ok(int(stored[0][0]) == 18, "a member's confirmation is saved on their account")
+    other_device = requests.Session()
+    b.login(other_device, "agmember", member_pw)
+    ok(not gated(other_device, "index.php"), "the member is not asked again on another device")
+    set_config("ageverification_min_age", 21)
+    b.purge_cache()
+    ok(gated(other_device, "index.php") and gated(guest, "index.php"), "raising the minimum age asks everyone again")
+    set_config("ageverification_min_age", 18)
+
+    bday_pw = secrets.token_urlsafe(12)
+    bday_id = b.add_user("agbirthday", bday_pw)
+    b.sql("UPDATE phpbb_users SET user_birthday = ' 1- 1-1990' WHERE user_id = ?", (bday_id,))
+    bday = requests.Session()
+    b.login(bday, "agbirthday", bday_pw)
+    b.purge_cache()
+    ok(gated(bday, "index.php"), "a member with a birthday is still asked while the birthday setting is off")
+    set_config("ageverification_birthday_skip", 1)
+    b.purge_cache()
+    ok(not gated(bday, "index.php"), "a member whose birthday shows they are old enough skips the gate when set")
+    young_pw = secrets.token_urlsafe(12)
+    young_id = b.add_user("agyoung", young_pw)
+    b.sql("UPDATE phpbb_users SET user_birthday = ' 1- 1-2015', user_ageverification = 18 WHERE user_id = ?", (young_id,))
+    young_member = requests.Session()
+    b.login(young_member, "agyoung", young_pw)
+    page = young_member.get(f"{b.base}/index.php").text
+    ok("Sorry, you must be 18 or older" in page and 'name="ageverification_confirm"' not in page,
+       "a member whose birthday says too young gets the too young page, even after confirming before")
+    set_config("ageverification_birthday_skip", 0)
+
+    set_config("ageverification_require_login", 1)
+    b.purge_cache()
+    confirmed_guest = guest
+    ok(gated(confirmed_guest, "index.php"), "when login is required, a guest's earlier confirmation no longer counts")
+    page = requests.get(f"{b.base}/{gate_path}").text
+    ok('name="ageverification_confirm"' not in page and "mode=login" in page and "mode=register" in page,
+       "when login is required, guests get Log in and Register instead of the confirm button")
+    lone = requests.Session()
+    page_url = f"{b.base}/{gate_path}"
+    lone.get(page_url)
+    time.sleep(1.1)
+    lone.post(page_url, data={"ageverification_confirm": "1"})
+    ok(not any(c.name.endswith("_ageverification") for c in lone.cookies), "a guest cannot confirm when login is required")
+    ok(not gated(requests.Session(), "ucp.php?mode=register"), "registering is reachable when login is required")
+    newbie_pw = secrets.token_urlsafe(12)
+    newbie_id = b.add_user("agnewbie", newbie_pw)
+    newbie = requests.Session()
+    b.login(newbie, "agnewbie", newbie_pw)
+    ok(gated(newbie, "index.php"), "a member who never confirmed is asked when login is required")
+    confirm(newbie)
+    ok(int(b.sql("SELECT user_ageverification FROM phpbb_users WHERE user_id = ?", (newbie_id,))[0][0]) == 18
+       and not gated(newbie, "index.php"), "the member confirms once and is remembered")
+    set_config("ageverification_require_login", 0)
+    b.purge_cache()
+
+    set_config("ageverification_enabled", 0)
+    b.sql("UPDATE phpbb_forums SET forum_ageverification = 1 WHERE forum_id = ?", (parent_id,))
+    b.purge_cache()
+    other = b.sql("SELECT f.forum_id FROM phpbb_forums f, phpbb_forums p WHERE p.forum_id = ? AND f.forum_type = 1 "
+                  "AND (f.left_id < p.left_id OR f.left_id > p.right_id) ORDER BY f.left_id", (parent_id,))
+    visitor = requests.Session()
+    ok(gated(visitor, f"viewforum.php?f={forum_id}"), "a forum below a gated forum is gated")
+    ok(gated(visitor, f"viewtopic.php?t={topic_id}"), "topics in it are gated")
+    ok(gated(visitor, f"posting.php?mode=reply&t={topic_id}"), "replying in it is gated")
+    ok(not gated(visitor, "index.php"), "the board index is not gated when only forums are")
+    if other:
+        ok(not gated(visitor, f"viewforum.php?f={int(other[0][0])}"), "forums outside the gated one are not gated")
+
+    confirmed = requests.Session()
+    confirm(confirmed)
+    poster = int(b.sql("SELECT topic_poster FROM phpbb_topics WHERE topic_id = ?", (topic_id,))[0][0])
+    search = f"search.php?author_id={poster}&sr=topics"
+    topic_link = re.compile(rf"[?&;]t={topic_id}\b")
+    ok(not topic_link.search(visitor.get(f"{b.base}/{search}").text)
+       and topic_link.search(confirmed.get(f"{b.base}/{search}").text),
+       "search results leave out the gated forum until the visitor confirms")
+    feed = b.route(f"feed/forum/{forum_id}")
+    ok("<entry>" not in visitor.get(f"{b.base}/{feed}").text and "<entry>" in confirmed.get(f"{b.base}/{feed}").text,
+       "the gated forum's feed is empty until the visitor confirms")
+    first_post = int(b.sql("SELECT topic_first_post_id FROM phpbb_topics WHERE topic_id = ?", (topic_id,))[0][0])
+    png = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+    if getattr(b, "version", "").startswith("4."):
+        # phpBB 4.0 serves only files its storage system tracks
+        b.php("$f = fopen('php://memory', 'r+'); fwrite($f, base64_decode('" + png + "')); rewind($f);"
+              "$phpbb_container->get('storage.attachment')->write('agv_probe', $f);")
+    else:
+        b.php("file_put_contents('files/agv_probe', base64_decode('" + png + "'));")
+    b.sql("INSERT INTO phpbb_attachments (post_msg_id, topic_id, in_message, poster_id, is_orphan, physical_filename, "
+          "real_filename, download_count, attach_comment, extension, mimetype, filesize, filetime, thumbnail) "
+          "VALUES (?, ?, 0, ?, 0, 'agv_probe', 'probe.png', 0, '', 'png', 'image/png', 68, 0, 0)",
+          (first_post, topic_id, poster))
+    b.sql("UPDATE phpbb_posts SET post_attachment = 1 WHERE post_id = ?", (first_post,))
+    b.sql("UPDATE phpbb_topics SET topic_attachment = 1 WHERE topic_id = ?", (topic_id,))
+    attach_id = int(b.sql("SELECT attach_id FROM phpbb_attachments WHERE physical_filename = 'agv_probe'")[0][0])
+    attach = b.route(f"download/attachment/{attach_id}") if b.route("x").startswith("index.php") \
+        else f"download/file.php?id={attach_id}"
+    ok(gated(visitor, attach), "an attachment in the gated forum, opened directly, asks first")
+    r = confirmed.get(f"{b.base}/{attach}", allow_redirects=False)
+    ok(r.status_code == 200 and r.content.startswith(b"\x89PNG"), "the attachment opens after confirming")
+    b.sql("UPDATE phpbb_forums SET forum_ageverification = 0 WHERE forum_id = ?", (parent_id,))
+
+    admin = requests.Session()
+    sid = b.login(admin, acp=True)
+    page_url = f"{b.base}/adm/index.php?i=-phpbbmodders-ageverification-acp-main_module&mode=settings&sid={sid}"
+    settings = admin.get(page_url).text
+    ok('id="ageverification_min_age"' in settings and 'id="ageverification_birthday_skip"' in settings, "the ACP settings page loads")
+    action, fields = form_fields(settings, "acp_ageverification")
+    data = {**fields, "ageverification_enabled": "1", "ageverification_min_age": "19", "ageverification_guest_time": "12",
+            "ageverification_guest_unit": "h", "ageverification_require_login": "0",
+            "ageverification_birthday_skip": "0", "ageverification_text": "[b]Adults only[/b]",
+            "ageverification_exit_url": "https://example.com/", "submit": "Submit"}
+    post_back(admin, f"{b.base}/adm", page_url, action, data)
+    saved = dict(b.sql("SELECT config_name, config_value FROM phpbb_config WHERE config_name IN "
+                       "('ageverification_enabled', 'ageverification_min_age', 'ageverification_guest_time', "
+                       "'ageverification_guest_unit', 'ageverification_exit_url')"))
+    ok(saved == {"ageverification_enabled": "1", "ageverification_min_age": "19", "ageverification_guest_time": "12",
+                 "ageverification_guest_unit": "h", "ageverification_exit_url": "https://example.com/"},
+       "the ACP saves the settings")
+    b.purge_cache()
+    leaver = requests.Session()
+    gate_page = leaver.get(f"{b.base}/{gate_path}").text
+    ok("<strong" in gate_page and "Adults only" in gate_page and "I am 19 or older" in gate_page,
+       "the gate page shows the saved text and age")
+    action, fields = form_fields(gate_page, "ageverification")
+    time.sleep(1.1)
+    r = leaver.post(f"{b.base}/{gate_path}", data={**fields, "ageverification_leave": "1"}, allow_redirects=False)
+    ok(r.headers.get("Location") == "https://example.com/", '"I am under 19" leads to the saved exit address')
+    action, fields = form_fields(admin.get(page_url).text, "acp_ageverification")
+    error = post_back(admin, f"{b.base}/adm", page_url, action, {**data, "ageverification_min_age": "0"})
+    ok("minimum age must be" in error and b.sql("SELECT config_value FROM phpbb_config WHERE config_name = "
+                                                 "'ageverification_min_age'")[0][0] == "19",
+       "the ACP refuses a minimum age of 0")
+    forum_page = admin.get(f"{b.base}/adm/index.php?i=acp_forums&mode=manage&action=edit&f={forum_id}&sid={sid}").text
+    ok('id="forum_ageverification"' in forum_page, "Manage forums shows the forum's age gate setting")
+
+    before = requests.Session()
+    confirm(before)
+    ok(not gated(before, "index.php"), "a guest who confirmed passes before everyone is asked again")
+    action, fields = form_fields(admin.get(page_url).text, "acp_ageverification")
+    box = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "ageverification_reset": "Ask everyone again"})
+    action, fields = form_fields(box, "confirm")
+    done = post_back(admin, f"{b.base}/adm", page_url, action, {**fields, "confirm": "Yes"})
+    b.purge_cache()
+    saved = b.sql("SELECT COUNT(*) FROM phpbb_users WHERE user_ageverification <> 0")[0][0]
+    ok("asked to confirm their age again" in done and int(saved) == 0, "Ask everyone again forgets members' answers")
+    ok(gated(before, "index.php"), "Ask everyone again makes guests' earlier answers stop counting")
+    set_config("ageverification_enabled", 0)
+    b.purge_cache()
+
+
 CHECKS = {
+    "phpbbmodders/ageverification": check_ageverification,
     "phpbbmodders/knowledgebase": check_knowledgebase,
     "phpbbmodders/translationhelper": check_translationhelper,
     "phpbbmodders/titaniatopictransfer": check_titaniatopictransfer,
